@@ -55,18 +55,6 @@ fn new_opens_another_document_and_each_keeps_its_own_text_and_undo() {
     assert_eq!(s.documents()[2].title, "Document3");
 }
 
-/// The leave-page guard asks `any_dirty`: edits in a document that is no longer active still
-/// count, so switching to a clean document doesn't let the tab close without asking.
-#[test]
-fn unsaved_changes_in_a_background_document_still_count() {
-    let mut s = s();
-    assert!(!s.any_dirty());
-    run(&mut s, "text.insert", json!({"text": "Alpha"}));
-    s.add_document(wordcraft_doc::Document::new());
-    assert!(!s.dirty, "the new active document is clean");
-    assert!(s.any_dirty(), "the first document's edits are unsaved");
-}
-
 /// Undo goes with its document: edit A, edit B, back to A, Undo takes A's edit back and leaves
 /// B alone; Redo puts it back. Find state stays with its document too.
 #[test]

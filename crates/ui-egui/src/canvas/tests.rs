@@ -2128,6 +2128,21 @@ fn a_refused_comment_draft_stays_with_its_document_on_new() {
     assert!(crate::panes::has_comment_drafts(h.state()), "the draft is back with its document");
 }
 
+/// The web page's leave-page guard holds for a comment draft waiting with a document in the
+/// background, though every document's text is saved.
+#[test]
+fn a_comment_draft_in_the_background_still_counts_as_unsaved_work() {
+    let (mut h, _) = refused_draft();
+    let reported = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = reported.clone();
+    h.state_mut().services.on_dirty = Some(Box::new(move |d| seen.set(Some(d))));
+    h.state_mut().run("file.new", json!({})).unwrap();
+    h.step();
+    assert!(!crate::panes::has_comment_drafts(h.state()), "the draft isn't the shown document's");
+    assert!(h.state().session.documents().iter().all(|d| !d.dirty), "no document has unsaved changes");
+    assert_eq!(reported.get(), Some(true));
+}
+
 /// #1348: Save with a refused draft saves the rest of the document, keeps the draft and says why.
 #[test]
 fn saving_with_a_refused_comment_draft_saves_the_document() {

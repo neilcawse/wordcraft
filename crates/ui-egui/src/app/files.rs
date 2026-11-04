@@ -460,4 +460,17 @@ impl WordApp {
             }
         }
     }
+
+    /// Open a file a host page sent (`name` names it, `bytes` are its contents) as File › Open
+    /// does, and say which document it became, as the open itself reports it (never guessed
+    /// from a document's title). `None` when the host must never write that document over the
+    /// file it sent: the file didn't open (the status line says why), it waits behind a password
+    /// prompt (after which it counts as a document the user opened), or it is an import-only
+    /// Word 97–2003 file that Save writes to a new .docx (#2445).
+    pub fn open_sent_file(&mut self, name: &str, bytes: &[u8]) -> Option<u64> {
+        let opened = self.run("file.open", json!({"path": name, "data": wordcraft_engine::cmd::insert::base64_encode(bytes)})).ok()?;
+        self.ui.backstage = false;
+        let id = opened.get("id").and_then(Value::as_u64)?;
+        (self.session.document_id() == id && !self.legacy_word_path()).then_some(id)
+    }
 }

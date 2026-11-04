@@ -1,20 +1,24 @@
 //! The `postMessage` bridge to a same-origin parent page (`?host=parent`), for pages that embed
-//! WordCraft in an `<iframe>` and keep its files (a Nextcloud app, a personal file server). The
-//! same messages as GridCraft's and PdfCraft's bridges; each is a plain object with a `type`:
+//! WordCraft in an `<iframe>` and keep its files (a Nextcloud app, a personal file server, the
+//! Craft Office extension). The same messages as GridCraft's and PdfCraft's bridges; each is a
+//! plain object with a `type`:
 //!
 //! - `wordcraft:ready` (to the parent): `{ version }`, sent once the app is running and
 //!   listening; send a file now.
 //! - `wordcraft:open` (from the parent): `{ name, bytes }`, bytes an `ArrayBuffer` or
 //!   `Uint8Array`. It opens like a document picked with File › Open or dropped on the window.
-//! - `wordcraft:opened` (to the parent): `{ name, docId }` once a sent file has opened: `docId`
-//!   is the document it became, or `null` when it didn't open (or waits behind a password
-//!   prompt, after which it counts as a document the user opened).
+//! - `wordcraft:opened` (to the parent): `{ name, docId }` once a sent file has been opened, in
+//!   the order they were sent: `docId` is the document it became, as the open reported it. It
+//!   is `null` when the parent must never write that document over the file it sent: the file
+//!   didn't open, it waits behind a password prompt (after which it counts as a document the
+//!   user opened), or it is an import-only Word 97–2003 file (Save writes a new .docx).
 //! - `wordcraft:save` (to the parent): `{ name, saveAs, bytes, docId, saveId }` (`bytes` a
 //!   transferred `ArrayBuffer`) for every file WordCraft would otherwise download. The parent
-//!   stores it and reports failures itself. `docId` is the document it came from (`null` when
-//!   none is open), the same number `wordcraft:opened` gave for a sent file, so the parent writes
-//!   it back only to that file. `saveId` numbers the saves. `saveAs` says whether the file
-//!   becomes the document's file:
+//!   stores it and reports failures itself. `docId` is the document the bytes were made from,
+//!   taken when they were made (`null`: no document's own file), the same number
+//!   `wordcraft:opened` gave for a sent file, so the parent writes it back only to that file.
+//!   `saveId` numbers the saves. `saveAs` (always there) says whether the file becomes the
+//!   document's file under a name the parent must ask for:
 //!   - Save: `false`. It writes the opened file under its own name and format, as the desktop
 //!     app does. A name the parent never sent (an untitled document, an imported .doc saved as
 //!     .docx) is a new file: `true`, as for Save As.
@@ -22,12 +26,20 @@
 //!     format that keeps everything (.docx and the other Word packages, .odt, .rtf). The document
 //!     is now that file; the next Save sends its name with `false`.
 //!   - Save As or Export to a format that doesn't (PDF, Markdown, plain text), Export as PDF and
-//!     Export Page as PNG: `false`. They are copies; the document's file stays the same.
+//!     Export Page as PNG: `false`. They are copies; the document's file stays the same, and a
+//!     parent that takes `saveAs` as "this is the document's new file" must not rebind it.
 //! - `wordcraft:saved` (from the parent, with `?ack=1`): `{ saveId, name }`, the save is stored
 //!   as `name`. Only then does a Save or Save As that keeps everything mark the document saved,
 //!   as it was when it was saved (later edits stay unsaved), and make `name` its file. Without
-//!   `?ack=1` the document counts as saved once it is handed over.
-//! - `wordcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
+//!   `?ack=1` the document counts as saved once it is handed over. Meanwhile a Save Changes
+//!   prompt's Save doesn't close or replace the document: the status line says it is waiting
+//!   for the save, and the user repeats the command once it is stored.
+//! - `wordcraft:discard` (from the parent, with `?ack=1`): `{ saveId }`, the parent will never
+//!   store that save (the picker was cancelled, the write failed, a newer save replaced it). The
+//!   document stays unsaved. At most [`crate::unacked::MAX_WAITING`] saves wait for an answer.
+//! - `wordcraft:dirty` (to the parent): `{ dirty }` whenever closing the page starts or stops
+//!   losing work: unsaved changes in any open document, comment text not yet written to one, or
+//!   text an input method is composing.
 //! - `wordcraft:request-save` (from the parent): save the document as File › Save would, so a
 //!   parent's own Save button or shortcut gets a `wordcraft:save` back.
 //! - `wordcraft:failed` (to the parent): `{ error }` when the app couldn't start.
@@ -42,25 +54,15 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
-use wordcraft_ui_egui::{HostSave, Inbox, Services, WordApp};
+use wordcraft_ui_egui::{HostSave, Services, WordApp};
+
+use crate::unacked::Unacked;
 
 /// The longest user name taken from `?author=`.
 const MAX_AUTHOR_CHARS: usize = 200;
 
 /// A file's name and bytes.
 type File = (String, Vec<u8>);
-/// Files waiting for the next frame.
-type Files = Rc<RefCell<VecDeque<File>>>;
-/// The sent file the app was given last frame, and the documents open before it.
-type Opening = Rc<RefCell<Option<(String, Vec<u64>)>>>;
-
-/// A save handed to the parent that marks its document saved once the parent has stored it
-/// (`?ack=1`): the document and its revision then.
-struct Unacked {
-    save_id: u64,
-    doc: u64,
-    rev: u64,
-}
 
 #[derive(Clone)]
 pub struct Bridge {
@@ -70,14 +72,11 @@ pub struct Bridge {
     /// `?ack=1`: a document counts as saved when the parent says it stored it (`wordcraft:saved`),
     /// not when it is handed over.
     ack: bool,
-    /// Other downloads since the last frame, posted after it with the active document.
-    downloads: Files,
-    /// Files the parent sent that the app hasn't been given yet.
-    sent: Files,
-    opening: Opening,
+    /// Files the parent sent that the app hasn't opened yet.
+    sent: Rc<RefCell<VecDeque<File>>>,
     /// Saves the parent stored since the last frame: `(saveId, name)`.
     stored: Rc<RefCell<Vec<(u64, String)>>>,
-    unacked: Rc<RefCell<Vec<Unacked>>>,
+    unacked: Rc<RefCell<Unacked>>,
     next_save_id: Rc<Cell<u64>>,
     /// The parent asked for a save (`wordcraft:request-save`) since the last frame.
     save_requested: Rc<Cell<bool>>,
@@ -107,9 +106,7 @@ impl Bridge {
             parent,
             origin,
             ack,
-            downloads: Rc::default(),
             sent: Rc::default(),
-            opening: Rc::default(),
             stored: Rc::default(),
             unacked: Rc::default(),
             next_save_id: Rc::new(Cell::new(1)),
@@ -120,18 +117,18 @@ impl Bridge {
     /// Hand saved and exported files to the parent instead of downloading them, report unsaved
     /// changes to it, and hear the files it sends.
     pub fn connect(&self, services: &mut Services, ctx: egui::Context) {
-        self.listen(ctx.clone());
+        self.listen(ctx);
         // Save, Save As and Export go to the parent at once, with the document they came from,
         // so a failed hand-off fails the save.
         let bridge = self.clone();
         services.host_save = Some(Box::new(move |save: &HostSave<'_>| bridge.hand_over(save)));
         services.host_confirms_saves = self.ack;
-        // Anything else that would download goes to the parent after the frame.
-        let downloads = Rc::clone(&self.downloads);
+        // Anything else that would download is a new file of no document's: the parent asks
+        // where it goes and never writes it over a document's file.
+        let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            downloads.borrow_mut().push_back((name.to_string(), bytes.to_vec()));
-            ctx.request_repaint();
-            Ok(())
+            let save_id = bridge.take_save_id();
+            bridge.post_save(name, bytes, true, None, save_id)
         }));
         // The browser's save picker is never used, so no save finishes later.
         services.async_saves = None;
@@ -161,27 +158,27 @@ impl Bridge {
         self.send(&[("type", "wordcraft:failed".into()), ("error", error.into())]);
     }
 
-    /// After each frame's logic: a save the parent asked for runs, other downloads go to the
-    /// parent with the active document, stored saves mark their document saved, the parent hears
-    /// which document the file it sent became, and the next sent file goes to the app.
-    pub fn sync(&self, app: &mut WordApp, inbox: &Inbox, ctx: &egui::Context) {
-        if self.save_requested.take()
-            && let Err(e) = app.run("file.save", serde_json::json!({}))
-        {
-            app.status(e);
+    /// After each frame's logic: a save the parent asked for runs, stored saves mark their
+    /// document saved, and the files the parent sent open, each answered with the document it
+    /// became. Anything that changed unsaved work is reported on the next frame, asked for here.
+    pub fn sync(&self, app: &mut WordApp, ctx: &egui::Context) {
+        let mut changed = false;
+        if self.save_requested.take() {
+            changed = true;
+            if let Err(e) = app.run("file.save", serde_json::json!({})) {
+                app.status(e);
+            }
         }
-        self.post_downloads(app);
-        self.apply_stored(app);
-        if let Some((name, before)) = self.opening.take() {
-            let docs = app.session.documents();
-            let doc = crate::doc_ids::opened_doc(&before, docs.iter().map(|d| (d.id, d.title.as_str())), &name);
+        changed |= self.apply_stored(app);
+        loop {
+            // Not borrowed while the file opens.
+            let next = self.sent.borrow_mut().pop_front();
+            let Some((name, bytes)) = next else { break };
+            changed = true;
+            let doc = app.open_sent_file(&name, &bytes);
             self.send(&[("type", "wordcraft:opened".into()), ("name", name.as_str().into()), ("docId", id_value(doc))]);
         }
-        let next = self.sent.borrow_mut().pop_front();
-        if let Some((name, bytes)) = next {
-            let before = app.session.documents().iter().map(|d| d.id).collect();
-            inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((name.clone(), bytes));
-            *self.opening.borrow_mut() = Some((name, before));
+        if changed {
             ctx.request_repaint();
         }
     }
@@ -192,38 +189,23 @@ impl Bridge {
         let save_id = self.take_save_id();
         self.post_save(save.name, save.bytes, save.save_as, Some(save.document), save_id)?;
         if self.ack && save.marks_saved {
-            self.unacked.borrow_mut().push(Unacked { save_id, doc: save.document, rev: save.rev });
+            self.unacked.borrow_mut().push(save_id, save.document, save.rev);
         }
         Ok(())
     }
 
-    fn post_downloads(&self, app: &WordApp) {
-        let downloads = std::mem::take(&mut *self.downloads.borrow_mut());
-        if downloads.is_empty() {
-            return;
-        }
-        let doc = app.session.documents().iter().find(|d| d.active).map(|d| d.id);
-        for (name, bytes) in downloads {
-            let save_id = self.take_save_id();
-            if let Err(e) = self.post_save(&name, &bytes, false, doc, save_id) {
-                log::error!("couldn't hand {name} to the page: {e}");
-            }
-        }
-    }
-
     /// A stored save makes `name` its document's file and marks the document saved if it hasn't
     /// changed since (later edits stay unsaved). Older saves of that document won't be stored
-    /// after a newer one, and saves of closed documents are forgotten.
-    fn apply_stored(&self, app: &mut WordApp) {
+    /// after a newer one, and saves of closed documents are forgotten. Whether any was stored.
+    fn apply_stored(&self, app: &mut WordApp) -> bool {
         let stored = std::mem::take(&mut *self.stored.borrow_mut());
+        let any = !stored.is_empty();
         let mut unacked = self.unacked.borrow_mut();
         for (save_id, name) in stored {
-            let Some(at) = unacked.iter().position(|u| u.save_id == save_id) else { continue };
-            let save = unacked.remove(at);
-            unacked.retain(|u| u.doc != save.doc || u.save_id > save_id);
-            let marked = app.session.with_document(save.doc, |s| {
+            let Some((doc, rev)) = unacked.stored(save_id) else { continue };
+            let marked = app.session.with_document(doc, |s| {
                 s.path = Some(std::path::PathBuf::from(&name));
-                if s.rev() == save.rev {
+                if s.rev() == rev {
                     s.dirty = false;
                 }
             });
@@ -231,7 +213,8 @@ impl Bridge {
                 log::info!("{name} is stored, but its document was closed");
             }
         }
-        unacked.retain(|u| app.session.is_open(u.doc));
+        unacked.retain_open(|doc| app.session.is_open(doc));
+        any
     }
 
     fn take_save_id(&self) -> u64 {
@@ -257,14 +240,15 @@ impl Bridge {
             .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
     }
 
-    /// Hear `wordcraft:open` (given to the app one per frame by [`Self::sync`]),
-    /// `wordcraft:saved` and `wordcraft:request-save` from the parent.
+    /// Hear `wordcraft:open` (opened after the frame by [`Self::sync`]), `wordcraft:saved`,
+    /// `wordcraft:discard` and `wordcraft:request-save` from the parent.
     fn listen(&self, ctx: egui::Context) {
         let parent = self.parent.clone();
         let origin = self.origin.clone();
         let save_requested = Rc::clone(&self.save_requested);
         let sent = Rc::clone(&self.sent);
         let stored = Rc::clone(&self.stored);
+        let unacked = Rc::clone(&self.unacked);
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
                 return;
@@ -280,6 +264,13 @@ impl Bridge {
                     let Some(save_id) = number(&data, "saveId") else { return };
                     let Some(name) = string(&data, "name").filter(|n| !n.trim().is_empty()) else { return };
                     stored.borrow_mut().push((save_id, name));
+                }
+                // Nothing to show: the document was unsaved and stays so.
+                Some("wordcraft:discard") => {
+                    if let Some(save_id) = number(&data, "saveId") {
+                        unacked.borrow_mut().discard(save_id);
+                    }
+                    return;
                 }
                 Some("wordcraft:request-save") => save_requested.set(true),
                 _ => return,

@@ -3629,6 +3629,39 @@ fn the_host_hears_about_edits_made_while_drawing() {
     assert_eq!(reported.get(), Some(true), "the host was told before the frame ended");
 }
 
+/// Text an input method is still composing is lost when the page closes: the host hears about
+/// it while it is there, and no longer once the composition is cancelled.
+#[test]
+fn the_host_hears_about_text_being_composed() {
+    let reported = std::rc::Rc::new(std::cell::Cell::new(None));
+    let mut a = app();
+    let seen = reported.clone();
+    a.services.on_dirty = Some(Box::new(move |d| seen.set(Some(d))));
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    for _ in 0..6 {
+        h.step();
+    }
+    assert_eq!(reported.get(), Some(false));
+    // A Latin composition (a dead key's, say): the harness has no CJK font to draw one.
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "e".into(), active_range_chars: None }));
+    h.step();
+    assert_eq!(h.state().canvas.ime_preedit, "e");
+    assert!(!h.state().session.dirty, "the composition isn't in the document yet");
+    assert_eq!(reported.get(), Some(true));
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.step();
+    h.step();
+    assert!(h.state().canvas.ime_preedit.is_empty());
+    assert_eq!(reported.get(), Some(false));
+}
+
 #[test]
 fn paragraph_alignment_keeps_the_canvas_focused_for_typing() {
     use wordcraft_doc::Align;
@@ -4420,6 +4453,71 @@ fn a_host_that_confirms_saves_leaves_the_document_unsaved_until_it_does() {
     a.run("ui.saveChanges", json!({"answer": "save"})).unwrap();
     assert!(a.session.is_open(document), "nothing closes before the page has stored the file");
     assert!(a.session.dirty);
+}
+
+/// The app with `host_save` recording each file's name and the document it was made from.
+fn host_app_recording_documents(confirms: bool) -> (WordApp, std::rc::Rc<std::cell::RefCell<Vec<(String, u64)>>>) {
+    let mut a = typed();
+    let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = got.clone();
+    a.services.download = Some(Box::new(|_, _| Err("downloads go to the host page".into())));
+    a.services.host_confirms_saves = confirms;
+    a.services.host_save = Some(Box::new(move |s: &HostSave<'_>| {
+        seen.borrow_mut().push((s.name.to_string(), s.document));
+        Ok(())
+    }));
+    (a, got)
+}
+
+/// Close › Save on the second of two documents hands over that document, even though closing
+/// it makes the first one active: the page must write the second document's file, never the
+/// first's. A page that confirms its saves keeps it open until it has stored the file.
+#[test]
+fn a_save_changes_prompt_hands_over_the_document_it_closes() {
+    for confirms in [false, true] {
+        let (mut a, got) = host_app_recording_documents(confirms);
+        host_open(&mut a, "first.docx");
+        let first = a.session.document_id();
+        host_open(&mut a, "second.docx");
+        let second = a.session.document_id();
+        assert_ne!(first, second, "the second file opened beside the first");
+        a.run("file.close", json!({})).unwrap();
+        assert_eq!(prompt(&a), Some("saveChanges"));
+        a.run("ui.saveChanges", json!({"answer": "save"})).unwrap();
+        assert_eq!(*got.borrow(), [("second.docx".to_string(), second)], "confirms: {confirms}");
+        if confirms {
+            assert!(a.session.is_open(second) && a.session.document_id() == second, "nothing closes before the page has stored it");
+            assert!(a.session.dirty);
+        } else {
+            assert!(!a.session.is_open(second));
+            assert!(a.session.is_open(first), "the other document stays");
+        }
+    }
+}
+
+/// A file the host page sends is the document its open made, not one named like it: a second
+/// copy of the same file is a document of its own. A file that doesn't open, one behind a
+/// password prompt, and an import-only Word 97–2003 file (#2445) are no document the page may
+/// write over the file it sent.
+#[test]
+fn a_sent_file_is_the_document_its_open_made() {
+    let mut a = typed();
+    let docx = wordcraft_engine::io::save_bytes_with("report.docx", &typed().session.doc, None, &Default::default()).unwrap();
+    let first = a.open_sent_file("report.docx", &docx);
+    assert_eq!(first, Some(a.session.document_id()));
+    let again = a.open_sent_file("report.docx", &docx);
+    assert_eq!(again, Some(a.session.document_id()));
+    assert_ne!(again, first, "a second copy is its own document");
+
+    assert_eq!(a.open_sent_file("broken.docx", b"not a Word document"), None);
+    assert_eq!(Some(a.session.document_id()), again, "nothing opened");
+
+    assert_eq!(a.open_sent_file("old.doc", &[]), None, "Save writes old.docx, a new file");
+    assert_eq!(a.session.path.as_deref(), Some(std::path::Path::new("old.doc")), "it did open");
+
+    let locked = wordcraft_engine::io::save_bytes_with("secret.docx", &typed().session.doc, Some("pw"), &Default::default()).unwrap();
+    assert_eq!(a.open_sent_file("secret.docx", &locked), None);
+    assert!(matches!(a.dialog, Some(crate::dialogs::Dialog::Password { .. })), "the password is asked for");
 }
 
 /// Macro-enabled documents and templates keep everything (#172), so once saved in this

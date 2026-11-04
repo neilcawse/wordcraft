@@ -164,7 +164,7 @@ impl eframe::App for WebShell {
         }
         self.app.logic(ctx);
         if let Some(bridge) = &self.bridge {
-            bridge.sync(&mut self.app, &self.inbox, ctx);
+            bridge.sync(&mut self.app, ctx);
         }
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
