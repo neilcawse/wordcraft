@@ -81,7 +81,7 @@ impl FontDb {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let enabled = self.sys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).enabled;
-            if enabled {
+            if enabled && self.family_covers(FAMILY, c) {
                 self.load_cataloged(FAMILY);
             }
         }
@@ -234,6 +234,46 @@ impl FontDb {
         (found, faces.len())
     }
 
+    /// Whether any cataloged file belonging to `family` maps `c`, indexing each file once.
+    /// The file bytes are scoped to coverage extraction, so a large collection that misses does
+    /// not keep its temporary buffer alive while the fallback search continues.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn family_covers(&self, family: &str, c: char) -> bool {
+        let paths = self.family_paths(family);
+        let cp = u32::from(c);
+        let mut index = self.coverage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = self.catalog_gen.load(Ordering::Acquire);
+        if index.generation != Some(generation) {
+            let mut known: HashMap<std::path::PathBuf, IndexedFile> =
+                std::mem::take(&mut index.files).into_iter().map(|f| (f.path.clone(), f)).collect();
+            let mut catalog_paths: Vec<std::path::PathBuf> =
+                self.catalog.read().unwrap_or_else(std::sync::PoisonError::into_inner).iter().map(|e| e.path.clone()).collect();
+            catalog_paths.sort();
+            catalog_paths.dedup();
+            index.files = catalog_paths
+                .into_iter()
+                .map(|path| known.remove(&path).unwrap_or_else(|| IndexedFile { used: index.loaded.contains(&path), path, ranges: None }))
+                .collect();
+            index.generation = Some(generation);
+        }
+        let CoverageIndex { files, reads, .. } = &mut *index;
+        for file in files.iter_mut().filter(|f| paths.contains(&f.path)) {
+            if let Some(ranges) = &file.ranges {
+                if ranges_hold(ranges, cp) {
+                    return true;
+                }
+                continue;
+            }
+            *reads += 1;
+            let ranges = read_fallback_file(&file.path).map(|data| coverage_ranges(&data)).unwrap_or_default();
+            file.ranges = Some(ranges);
+            if file.ranges.as_ref().is_some_and(|ranges| ranges_hold(ranges, cp)) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Load a system font covering `c` (preferred fallback families first, then any cataloged
     /// file under 40 MB, found through the coverage index). Returns true if one was loaded.
     /// Misses are remembered.
@@ -253,10 +293,13 @@ impl FontDb {
         let rtl = crate::is_rtl(c) || arabic_block(c);
         let preferred = RTL_FALLBACKS.iter().filter(|_| rtl);
         for fam in crate::script_fallbacks(c).iter().chain(preferred).chain(SYSTEM_FALLBACKS.iter()) {
-            // Each family is tried once: one that fails to load isn't read again per character.
             if self.is_loaded(fam) || !cataloged.iter().any(|f| f.eq_ignore_ascii_case(fam)) {
                 continue;
             }
+            if !self.family_covers(fam, c) {
+                continue;
+            }
+            // Each family is tried once: one that fails to load isn't read again per character.
             if !self.sys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).tried.insert(fam) {
                 continue;
             }

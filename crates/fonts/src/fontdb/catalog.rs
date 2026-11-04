@@ -179,6 +179,8 @@ impl FontDb {
     /// Returns the number of faces cataloged.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_system_fonts(&self) -> usize {
+        self.sys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).tried.clear();
+        self.coverage.lock().unwrap_or_else(std::sync::PoisonError::into_inner).files.clear();
         // The first scan, or a rescan once it is done (never both at once).
         let mut first = None;
         self.cataloged.get_or_init(|| first = Some(self.scan_font_dirs()));

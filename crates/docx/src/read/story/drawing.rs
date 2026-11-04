@@ -251,7 +251,12 @@ impl Reader<'_> {
     /// A picture: the first `a:blip` in `pic` and its crop.
     fn read_pic(&mut self, pic: &El, rels: &Rels, w: f32, h: f32, alt: String, mut float: Float) -> Option<InlineObject> {
         let blip = pic.find("a:blip")?;
-        float.set_spin(xfrm_spin(pic.find("pic:spPr")));
+        let sppr = pic.find("pic:spPr");
+        float.set_spin(xfrm_spin(sppr));
+        let paint = shape_paint(sppr, None, &self.doc.settings.theme_colors, &self.theme_fills, self.group_fill.as_ref());
+        float.pic_stroke = paint.stroke;
+        float.pic_stroke_width = paint.stroke_width;
+        float.pic_effects = sppr.and_then(|s| s.child("a:effectLst")).map(effect_list).unwrap_or_default();
         let media = blip.attr("r:embed").and_then(|id| self.media_for(rels, id))?;
         let mut crop = [0.0f32; 4];
         if let Some(sr) = pic.find("a:srcRect") {
@@ -259,7 +264,7 @@ impl Reader<'_> {
                 if let Some(v) = sr.attr(n).and_then(int)
                     && let Some(slot) = crop.get_mut(i)
                 {
-                    *slot = (v.clamp(0, 100_000) as f32 / 100_000.0).clamp(0.0, 1.0);
+                    *slot = (v.clamp(-100_000, 100_000) as f32 / 100_000.0).clamp(-1.0, 1.0);
                 }
             }
         }
@@ -359,7 +364,7 @@ impl Reader<'_> {
             let x = group_xfrm(sppr);
             let ((ox, oy), (ew, eh)) = (x.off, x.ext);
             if e.name == "wpg:grpSp" || e.name == "wpg:wgp" {
-                if depth >= 8 {
+                if depth >= 64 {
                     continue;
                 }
                 // Its members' space maps onto its own box.
