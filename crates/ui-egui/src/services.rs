@@ -42,6 +42,10 @@ pub struct Services {
     /// under its own name and format, as on the desktop, and a Save or Save As that keeps
     /// everything makes that name the document's file, so the next Save goes to it.
     pub host_save: Option<HostSaveFn>,
+    /// Web, with `host_save`: the page says when it has stored a save. A Save or Save As that
+    /// keeps everything then leaves the document unsaved, and under its old file name, until the
+    /// host marks it saved; a Save Changes prompt's New/Open/Close doesn't run meanwhile.
+    pub host_confirms_saves: bool,
     /// Web: told whether the document has unsaved changes after each pass, for the browser's
     /// leave-page guard (`beforeunload` runs between frames and can't ask the app).
     pub on_dirty: Option<Box<dyn Fn(bool)>>,
@@ -97,6 +101,20 @@ pub struct Services {
 /// Files delivered asynchronously.
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
-/// [`Services::host_save`]: `(file name, bytes, save_as)`. An error means the page didn't get
-/// the file, and the save failed.
-pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool) -> Result<(), String>>;
+/// A file handed to the host page ([`Services::host_save`]).
+pub struct HostSave<'a> {
+    pub name: &'a str,
+    pub bytes: &'a [u8],
+    /// The file becomes the document's file (see [`Services::host_save`]).
+    pub save_as: bool,
+    /// The save counts as saving the document: a Save or Save As that keeps everything.
+    pub marks_saved: bool,
+    /// The document it came from ([`wordcraft_engine::Session::document_id`]).
+    pub document: u64,
+    /// That document's revision when it was saved ([`wordcraft_engine::Session::rev`]): the host
+    /// that confirms saves marks the document saved only if it hasn't changed since.
+    pub rev: u64,
+}
+
+/// [`Services::host_save`]. An error means the page didn't get the file, and the save failed.
+pub type HostSaveFn = Box<dyn Fn(&HostSave<'_>) -> Result<(), String>>;

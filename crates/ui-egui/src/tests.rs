@@ -4285,7 +4285,8 @@ fn host_app(fail: bool) -> (WordApp, std::rc::Rc<std::cell::RefCell<Vec<(String,
     let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = got.clone();
     a.services.download = Some(Box::new(|_, _| Err("downloads go to the host page".into())));
-    a.services.host_save = Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool| {
+    a.services.host_save = Some(Box::new(move |s: &HostSave<'_>| {
+        let (name, bytes, save_as) = (s.name, s.bytes, s.save_as);
         if fail {
             return Err("the page is gone".into());
         }
@@ -4389,6 +4390,35 @@ fn a_host_save_that_fails_leaves_the_document_unsaved() {
     let (mut a, _) = host_app(true);
     host_open(&mut a, "report.docx");
     assert!(a.execute("file.save", json!({})).is_err());
+    assert!(a.session.dirty);
+}
+
+/// A page that confirms its saves marks the document saved itself: the hand-off leaves it
+/// unsaved under its old name, says which document and revision it was, and a Save Changes
+/// prompt's Close waits for the page.
+#[test]
+fn a_host_that_confirms_saves_leaves_the_document_unsaved_until_it_does() {
+    let mut a = typed();
+    let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = got.clone();
+    a.services.download = Some(Box::new(|_, _| Err("downloads go to the host page".into())));
+    a.services.host_confirms_saves = true;
+    a.services.host_save = Some(Box::new(move |s: &HostSave<'_>| {
+        seen.borrow_mut().push((s.name.to_string(), s.marks_saved, s.document, s.rev));
+        Ok(())
+    }));
+    host_open(&mut a, "report.docx");
+    let (document, rev) = (a.session.document_id(), a.session.rev());
+    let v = a.execute("file.saveAs", json!({"path": "copy.docx"})).unwrap();
+    assert_eq!(v["hostConfirms"], json!(true));
+    assert!(a.session.dirty);
+    assert_eq!(a.session.path.as_deref(), Some(std::path::Path::new("report.docx")));
+    assert_eq!(*got.borrow(), [("copy.docx".to_string(), true, document, rev)]);
+    a.execute("file.exportPdf", json!({})).unwrap();
+    assert!(!got.borrow()[1].1, "an export doesn't save the document");
+    a.run("file.close", json!({})).unwrap();
+    a.run("ui.saveChanges", json!({"answer": "save"})).unwrap();
+    assert!(a.session.is_open(document), "nothing closes before the page has stored the file");
     assert!(a.session.dirty);
 }
 

@@ -3,6 +3,7 @@ use super::{
     file_dialogs, i18n, json, keeps_everything, keytips, now_ms, options, panes, paste_picture, printing, push_recent_font, system_clipboard,
     table_pen, theme, widgets, zotero,
 };
+use crate::HostSave;
 
 impl WordApp {
     /// `run` for a command a mouse drag on a table sends: the view stays where it is.
@@ -168,7 +169,14 @@ impl WordApp {
             let opened_name = self.session.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
             let new_file = id == "file.saveAs" || opened_name.as_deref() != Some(name.as_str());
             let delivered = match (&self.services.host_save, &self.services.download) {
-                (Some(host), _) => host(&name, &bytes, marked_saved && new_file),
+                (Some(host), _) => host(&HostSave {
+                    name: &name,
+                    bytes: &bytes,
+                    save_as: marked_saved && new_file,
+                    marks_saved: marked_saved,
+                    document: self.session.document_id(),
+                    rev: self.session.rev(),
+                }),
                 (None, Some(download)) => download(&name, &bytes),
                 (None, None) => Ok(()),
             };
@@ -177,6 +185,12 @@ impl WordApp {
                 log::error!("download of {name} failed: {e}");
                 self.status(msg.clone());
                 return Err(msg);
+            }
+            // A host page that confirms its saves marks the document saved itself once the file
+            // is stored ([`Services::host_confirms_saves`]).
+            let host_confirms = self.services.host_save.is_some() && self.services.host_confirms_saves;
+            if marked_saved && host_confirms {
+                return Ok(json!({"downloaded": name, "bytes": bytes.len(), "hostConfirms": true}));
             }
             if marked_saved {
                 self.session.dirty = false;

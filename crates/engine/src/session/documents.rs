@@ -403,6 +403,11 @@ impl Session {
         id == self.document_id || self.others.iter().any(|d| d.document_id == id)
     }
 
+    /// Whether any open document, active or not, has unsaved changes.
+    pub fn any_dirty(&self) -> bool {
+        self.dirty || self.others.iter().any(|d| d.dirty)
+    }
+
     /// Every open document in the order they were opened, the active one included.
     pub fn documents(&self) -> Vec<DocInfo> {
         self.order

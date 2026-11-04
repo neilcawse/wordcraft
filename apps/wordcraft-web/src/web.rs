@@ -29,8 +29,13 @@ pub fn start() {
             return;
         };
         // `?host=parent`: a same-origin page framing WordCraft opens documents in it and stores
-        // what it saves (`host`). That page guards leaving it, so this one doesn't.
-        let bridge = if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None };
+        // what it saves (`host`); `&ack=1` when it confirms each save. That page guards leaving
+        // it, so this one doesn't.
+        let bridge = if query_param("host").as_deref() == Some("parent") {
+            crate::host::Bridge::new(query_param("ack").as_deref() == Some("1"))
+        } else {
+            None
+        };
         let app_bridge = bridge.clone();
         let dirty = Rc::new(Cell::new(false));
         let saves = AsyncSaves::default();
@@ -71,7 +76,7 @@ pub fn start() {
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
                     if let Some(bridge) = &app_bridge {
-                        bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
+                        bridge.connect(&mut services, cc.egui_ctx.clone());
                     }
                     let mut app = WordApp::new(session, services);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
@@ -100,7 +105,7 @@ pub fn start() {
                         crate::host::Bridge::set_author(&mut app, &author);
                         prefs.keep_own_author(&app.session.author, &own);
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, bridge: app_bridge.clone() }))
                 }),
             )
             .await;
@@ -135,6 +140,8 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
+    /// The `?host=parent` bridge, when a parent page keeps the files.
+    bridge: Option<crate::host::Bridge>,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -148,14 +155,17 @@ fn stored_prefs() -> Option<String> {
 
 impl eframe::App for WebShell {
     /// Runs one browser frame: forwards queued host messages to the status bar, advances the app,
-    /// then writes changed preferences to browser storage immediately, because a reload or closed
-    /// tab never runs the exit path.
+    /// lets the host page's bridge do its part, then writes changed preferences to browser storage
+    /// immediately, because a reload or closed tab never runs the exit path.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
             self.app.status(msg);
         }
         self.app.logic(ctx);
+        if let Some(bridge) = &self.bridge {
+            bridge.sync(&mut self.app, &self.inbox, ctx);
+        }
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {

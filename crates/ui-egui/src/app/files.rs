@@ -61,9 +61,16 @@ impl WordApp {
     /// (a note.txt that was opened) is a save in any format (#2376). A save that fails (no permission, the
     /// file locked by another app, a missing folder) is the save's error ([`Self::save_failed`]
     /// tells the user).
-    /// In the browser the save picker may write the file later ([`PromptSave::Later`], #1315).
+    /// In the browser the save picker may write the file later ([`PromptSave::Later`], #1315). A
+    /// host page that confirms its saves ([`crate::Services::host_confirms_saves`]) hasn't stored
+    /// the file yet either: the command is cancelled and the document stays open; once the page
+    /// has stored the file (and nothing changed since), trying again doesn't ask.
     fn save_for_prompt(&mut self) -> Result<PromptSave, String> {
         let v = self.execute("file.save", json!({}))?;
+        if v.get("hostConfirms").and_then(Value::as_bool) == Some(true) {
+            self.status(tl!("Waiting for the save to finish…"));
+            return Ok(PromptSave::NotSaved);
+        }
         let saved = v.get("saved").and_then(Value::as_bool) == Some(true) || v.get("downloaded").is_some();
         if !self.safely_saved(saved) {
             return Ok(PromptSave::NotSaved);
