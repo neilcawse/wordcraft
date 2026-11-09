@@ -139,6 +139,7 @@ Ranked, to beta (detail and remaining milestones in [docs/roadmap.md](docs/roadm
 
 ## Progress log
 
+- 2026-11-09: Text typed in the Alt Text pane is no longer lost (AI-9882). A description or table title typed in a field that still has the keyboard counts as unsaved work (the web page's leave-page guard and the Save Changes prompt see it), is written before every command that saves, exports, prints, shares or closes the document, as comment text is, and survives hiding the pane or opening File; it belongs to its document and to its picture, shape or table. The Comments pane shows a reply draft started in a balloon without a click on Reply there. With a host page that owns saving (the web app), File › Save goes back to the document when the page refuses the file, so the status bar says why, instead of stopping on the Save As page. Readiness unchanged.
 - 2026-11-03: Proofing (CP4.3): craft-proof moves to craft-libs main with #589 and #590. French spelling suggestions offer the elided form first (`Jadore` → `J'adore`, before `J adore`), and Valencian text (`ca-ES-valencia`) is proofed with the `ca-valencia` pack instead of plain Catalan. Readiness unchanged.
 - 2026-11-03: A long comment no longer grows its card or balloon without limit (#3382). Its field in the Comments pane and in a selected balloon stops at ten lines and scrolls, keeping the caret in view; a balloon that isn't selected shows the first ten lines of the comment and of each reply, and clicking it opens the scrolling field. The buttons and the next comment stay in view.
 - 2026-11-03: Security: pasting text boxes charges each copied story for its formatting too (run, mark, paragraph and section properties), not only its text and objects, so a story with huge style or font names can't copy past the paste's 32 MiB text box budget. Readiness unchanged.
@@ -707,6 +708,7 @@ Footer page-table height and body wrapping are corrected. Other pagination gaps 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | trivial | Progress log: Alt Text drafts count as unsaved work and are written before saving; the Comments pane shows a reply draft started in a balloon; File › Save returns to the document when the host page refuses the file (AI-9882) |
 | 2026-11-03 | trivial | Progress log: craft-proof pin, French elision suggestions and Valencian (CP4.3) |
 | 2026-11-03 | trivial | Progress log: a long comment's card and balloon stop at ten lines (#3382) |
 | 2026-11-03 | trivial | Progress log: Replace and Remove Table of Contents with Word's title above a section break (#4041) |

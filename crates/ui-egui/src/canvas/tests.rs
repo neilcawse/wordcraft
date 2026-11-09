@@ -2026,6 +2026,33 @@ fn replying_to_a_comment_from_its_balloon_posts_the_reply() {
     assert_eq!(comment_text(h.state(), replies[0]), "A reply");
 }
 
+/// A reply started in a balloon and then refused (here the document became read-only) stays a
+/// draft, and the Comments pane shows it without a click on Reply there. Whether a card's reply
+/// field was open used to be a flag in egui's memory alone, so the pane hid a draft it had no
+/// flag for, though the document counted it as unsaved work.
+#[test]
+fn the_comments_pane_shows_a_reply_draft_started_in_a_balloon() {
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
+    let (mut h, id) = comment_harness();
+    click_balloon(&mut h, id);
+    h.get_by_label("Reply").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    type_in(&mut h, "A reply");
+    h.state_mut().session.doc.settings.protection = Some("readOnly".into());
+    leave_field(&mut h);
+    h.state_mut().session.doc.settings.protection = None;
+    assert!(crate::panes::has_comment_drafts(h.state()), "the refused reply is still a draft");
+    h.state_mut().run("view.commentsPane", json!({"value": true})).unwrap();
+    for _ in 0..4 {
+        h.step();
+    }
+    let fields: Vec<String> = h.get_all_by_role(Role::MultilineTextInput).filter_map(|n| n.value()).collect();
+    assert!(fields.iter().any(|v| v == "A reply"), "the pane shows the pending reply: {fields:?}");
+}
+
 /// #1348: a draft typed in one document never lands in another document's comment that happens
 /// to have the same id.
 #[test]

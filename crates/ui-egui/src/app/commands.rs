@@ -29,11 +29,12 @@ impl WordApp {
     /// Close, Envelopes, Labels and Finish & Merge on a document with unsaved changes first ask
     /// Save / Don't Save / Cancel, and the command runs once that is answered (`ui.saveChanges`).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        // Comment text still being typed is written first, so a save or export has it and a
-        // close, New or Open counts it as a change (#1348). A draft the document refuses is not
-        // part of it: saving and exporting go on without it (the refusal stays on the status
-        // line), and replacing the document asks Save / Don't Save / Cancel about it.
-        let refused = if flushes_comment_drafts(id, &params) { panes::flush_comment_drafts(self).err() } else { None };
+        // Text still being typed in a comment or Alt Text field is written first, so a save or
+        // export has it and a close, New or Open counts it as a change (#1348). A draft the
+        // document refuses is not part of it: saving and exporting go on without it (the
+        // refusal stays on the status line), and replacing the document asks Save / Don't Save /
+        // Cancel about it.
+        let refused = if flushes_drafts(id, &params) { self.flush_drafts().err() } else { None };
         if id == "file.recover" && params.as_object().is_none_or(|p| p.is_empty()) {
             self.ui.backstage = true;
             self.ui.backstage_page = "recover".into();
@@ -1054,9 +1055,9 @@ pub(crate) fn works_without_document(id: &str) -> bool {
     ) || id.starts_with("help.")
 }
 
-/// Commands that save, export, print, send or replace the document: comment text still being
-/// typed is written before them (#1348).
-fn flushes_comment_drafts(id: &str, params: &Value) -> bool {
+/// Commands that save, export, print, send or replace the document: text still being typed in a
+/// comment or Alt Text field is written before them (#1348).
+fn flushes_drafts(id: &str, params: &Value) -> bool {
     matches!(
         id,
         "file.save"

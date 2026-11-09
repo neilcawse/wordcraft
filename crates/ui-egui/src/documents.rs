@@ -1,6 +1,6 @@
 //! Several open documents. On the desktop each has a window of its own ([`crate::windows`]); the
 //! web app shows them in one window, which shows the session's active document. What the app
-//! keeps about a document (AutoSave's file, comment drafts) follows the active one. In one
+//! keeps about a document (AutoSave's file, comment and Alt Text drafts) follows the active one. In one
 //! window, the window's own state about the page (drags, menus, the composition…) starts afresh
 //! when the document changes ([`WordApp::sync_document`]; per-window state is listed in
 //! [`crate::window_ui`]). View › Window › Switch Windows lists the open documents, File › Close
@@ -19,6 +19,15 @@ pub(crate) struct Parked {
     autosave_path: Option<std::path::PathBuf>,
     /// Comment and reply text typed in this document and not yet written to it.
     comment_drafts: panes::CommentDrafts,
+    /// Alt Text typed in this document and not yet written to it.
+    alt_text_drafts: crate::a11y_pane::AltTextDrafts,
+}
+
+impl Parked {
+    /// Text typed in this document and not yet written to it.
+    fn has_drafts(&self) -> bool {
+        !self.comment_drafts.is_empty() || !self.alt_text_drafts.is_empty()
+    }
 }
 
 impl WordApp {
@@ -100,7 +109,11 @@ impl WordApp {
         if from == to {
             return false;
         }
-        let leaving = Parked { autosave_path: self.autosave_path.take(), comment_drafts: std::mem::take(&mut self.comment_drafts) };
+        let leaving = Parked {
+            autosave_path: self.autosave_path.take(),
+            comment_drafts: std::mem::take(&mut self.comment_drafts),
+            alt_text_drafts: std::mem::take(&mut self.alt_text_drafts),
+        };
         if self.session.is_open(from) {
             self.parked.insert(from, leaving);
         }
@@ -109,6 +122,7 @@ impl WordApp {
         let back = back.unwrap_or_default();
         self.autosave_path = back.autosave_path;
         self.comment_drafts = back.comment_drafts;
+        self.alt_text_drafts = back.alt_text_drafts;
         let session = &self.session;
         self.parked.retain(|d, _| session.is_open(*d));
         seen
@@ -139,17 +153,17 @@ impl WordApp {
 
     /// The open documents with work that would be lost on quitting: the shown one first, then
     /// the others in the order they were opened. Unsaved changes, a save the browser hasn't
-    /// confirmed, or comment text not yet written to the document. The Start screen's
-    /// placeholder is never one, though other windows' documents are.
+    /// confirmed, or text typed in a comment or Alt Text field and not yet written to the
+    /// document. The Start screen's placeholder is never one, though other windows' documents are.
     fn unsaved_documents(&self) -> Vec<u64> {
         let active = self.session.document_id();
         let mut out = Vec::new();
-        if self.has_document() && (self.session.dirty || self.save_unconfirmed() || panes::has_comment_drafts(self)) {
+        if self.has_document() && (self.session.dirty || self.save_unconfirmed() || self.has_drafts()) {
             out.push(active);
         }
         for d in self.session.documents() {
             let unconfirmed = || self.saves_in_flight.iter().any(|s| s.marked_saved && s.document == d.id);
-            let drafts = || self.parked.get(&d.id).is_some_and(|p| !p.comment_drafts.is_empty());
+            let drafts = || self.parked.get(&d.id).is_some_and(Parked::has_drafts);
             if d.id != active && Some(d.id) != self.no_document && (d.dirty || unconfirmed() || drafts()) {
                 out.push(d.id);
             }
@@ -160,6 +174,22 @@ impl WordApp {
     /// Whether an open document has work that quitting would lose.
     pub(crate) fn has_unsaved_documents(&self) -> bool {
         !self.unsaved_documents().is_empty()
+    }
+
+    /// Whether the shown document has text typed in a comment, reply or Alt Text field and not
+    /// yet written to it (typed, or kept after the document refused it): closing the page or
+    /// replacing the document would lose it.
+    pub(crate) fn has_drafts(&self) -> bool {
+        panes::has_comment_drafts(self) || crate::a11y_pane::has_alt_text_drafts(self)
+    }
+
+    /// Write every pending comment, reply and Alt Text draft to the shown document, so a save has
+    /// them and a close, New or Open sees them as unsaved changes (#1348). Every draft is tried;
+    /// the first refusal is returned (and is on the status line), and refused drafts stay.
+    pub(crate) fn flush_drafts(&mut self) -> Result<(), String> {
+        let comments = panes::flush_comment_drafts(self);
+        let alt_text = crate::a11y_pane::flush_alt_text_drafts(self);
+        comments.and(alt_text)
     }
 
     /// Quitting: show the next document with unsaved work and ask Save / Don't Save / Cancel

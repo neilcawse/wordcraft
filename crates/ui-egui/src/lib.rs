@@ -632,6 +632,8 @@ pub struct WordApp {
     no_document: Option<u64>,
     /// Comment and reply text typed but not yet written to the document (#1348).
     pub(crate) comment_drafts: panes::CommentDrafts,
+    /// Alt Text typed in the Alt Text pane but not yet written to the document.
+    pub(crate) alt_text_drafts: a11y_pane::AltTextDrafts,
     /// The document the window's per-document state belongs to; when the session's active
     /// document is another, [`WordApp::sync_document`] puts that state aside and brings the
     /// other's.

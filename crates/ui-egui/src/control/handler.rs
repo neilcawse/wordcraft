@@ -88,9 +88,10 @@ pub(crate) fn close_refused(app: &WordApp, id: &str, params: &Value) -> Option<&
     if id == "file.close" && app.session.dirty {
         return Some(UNSAVED);
     }
-    // Comment text still being typed is unsaved work too (#1348): replacing the document would drop it.
-    (crate::discards_document(id, params) && crate::panes::has_comment_drafts(app))
-        .then_some("a comment is still being edited: finish it first, or pass {\"force\": true} to discard it")
+    // Text still being typed in a comment or Alt Text field is unsaved work too (#1348): replacing
+    // the document would drop it.
+    (crate::discards_document(id, params) && app.has_drafts())
+        .then_some("a comment or Alt Text is still being edited: finish it first, or pass {\"force\": true} to discard it")
 }
 
 const UNSAVED: &str = "the document has unsaved changes: save it first, or pass {\"force\": true} to discard them and close";

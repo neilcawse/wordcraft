@@ -210,6 +210,7 @@ impl WordApp {
             // Per document: the shown document's, swapped with `parked` on a document switch.
             autosave_path: _,
             comment_drafts: _,
+            alt_text_drafts: _,
             parked: _,
             // Per window.
             ui,

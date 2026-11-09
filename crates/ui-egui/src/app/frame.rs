@@ -38,9 +38,10 @@ impl WordApp {
     }
 
     /// Tell the host whether closing the page would lose work ([`Services::on_dirty`]): any open
-    /// document with unsaved changes, a save not yet confirmed, or comment text not yet written
-    /// to it (the shown document's or one in the background), and text an input method is still
-    /// composing. The leave-page guard must hold for a document in the background too.
+    /// document with unsaved changes, a save not yet confirmed, or text typed in a comment or Alt
+    /// Text field and not yet written to it (the shown document's or one in the background), and
+    /// text an input method is still composing. The leave-page guard must hold for a document in
+    /// the background too.
     pub(super) fn report_dirty(&self) {
         if let Some(f) = &self.services.on_dirty {
             f(self.has_unsaved_documents() || !self.canvas.ime_preedit.is_empty());

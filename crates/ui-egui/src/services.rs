@@ -47,9 +47,9 @@ pub struct Services {
     /// host marks it saved; a Save Changes prompt's New/Open/Close doesn't run meanwhile.
     pub host_confirms_saves: bool,
     /// Web: told after each pass whether closing the page would lose work (unsaved changes or
-    /// comment drafts in any open document, a save not yet confirmed, text an input method is
-    /// composing), for the browser's leave-page guard (`beforeunload` runs between frames and
-    /// can't ask the app).
+    /// comment and Alt Text drafts in any open document, a save not yet confirmed, text an input
+    /// method is composing), for the browser's leave-page guard (`beforeunload` runs between
+    /// frames and can't ask the app).
     pub on_dirty: Option<Box<dyn Fn(bool)>>,
     /// Web: hand PDF bytes to the browser's print dialog (no download or intermediate file).
     /// Desktop uses `print_native` instead. An error means nothing was opened.

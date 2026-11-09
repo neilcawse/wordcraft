@@ -92,6 +92,7 @@ Right-click and Shift+F10 keep the compact suggestions menu. The pane is shared 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | trivial | Alt Text pane: description and table title typed in a field that still has the keyboard count as unsaved work, are written before saving, exporting, printing or closing, and survive hiding the pane or opening File; drafts belong to their document and object or table. Comments pane: a reply draft started in a balloon shows without a click on Reply. File › Save with a host page that owns saving returns to the document when the page refuses the file (AI-9882) |
 | 2026-11-03 | trivial | Comments: a long comment's card, balloon and fields stop at ten lines; the fields scroll, and a balloon that isn't selected shows the first ten lines of the comment and of each reply (#3382) |
 | 2026-11-03 | minor | Arabic mirrored interface: title bar, ribbon, panes, File page, dialogs and menus run from the right; document canvas stays independent (#1195); Hebrew UI still open |
 | 2026-10-31 | trivial | Keytips: Alt, F badges the Backstage pages with Word's letters and the letter opens the page; Alt, F, P and Alt, F, V open Print; the badges end with the Backstage (#4960) |

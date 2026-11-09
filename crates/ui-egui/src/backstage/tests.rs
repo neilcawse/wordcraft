@@ -983,6 +983,68 @@ fn backstage_save_closes_when_saved() {
     assert!(!h.state().ui.backstage, "successful save closes backstage");
 }
 
+/// A host page that owns saving (the Craft Office extension) can refuse the file. File › Save
+/// then goes back to the document, where the status bar says why. The Save As page it used to
+/// land on needs the native file dialogs a browser doesn't have, and File hides the status bar,
+/// so the user was left on a page that can do nothing, with the reason out of sight.
+#[test]
+fn backstage_save_refused_by_the_host_page_returns_to_the_document() {
+    let services = Services {
+        download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))),
+        host_save: Some(Box::new(|_: &crate::HostSave<'_>| Err("the page didn't take the file".to_string()))),
+        ..Default::default()
+    };
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+    a.run("text.insert", json!({"text": "Unsaved words"})).unwrap();
+    a.run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    h.run_steps(4);
+    h.get_by_label("Save").click();
+    h.run_steps(4);
+    assert!(!h.state().ui.backstage, "back on the document, not on the Save As page");
+    assert!(h.state().has_document());
+    let msg = h.state().status_msg.as_ref().map(|(m, _)| m.clone()).expect("the refusal is on the status bar");
+    assert!(msg.contains("the page didn't take the file"), "{msg:?}");
+    assert!(h.state().session.dirty, "nothing was saved");
+}
+
+/// The desktop keeps its behaviour: a Save that fails leaves File open on the Save As page,
+/// which can pick another place.
+#[test]
+fn backstage_save_failure_on_the_desktop_stays_on_the_save_as_page() {
+    let dir = std::env::temp_dir().join(format!("wordcraft-backstage-save-gone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Report.docx");
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+    a.run("text.insert", json!({"text": "Saved words"})).unwrap();
+    a.run("file.save", json!({"path": path.to_string_lossy()})).unwrap();
+    a.run("text.insert", json!({"text": " and more"})).unwrap();
+    // The folder goes away, so the next Save can't write its file.
+    std::fs::remove_dir_all(&dir).unwrap();
+    a.run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    h.run_steps(4);
+    h.get_by_label("Save").click();
+    h.run_steps(4);
+    assert!(h.state().ui.backstage && h.state().ui.backstage_page == "saveAs", "the desktop offers Save As again");
+    assert!(h.state().session.dirty, "nothing was saved");
+}
+
 /// #1124: the side menu had no Close. It sits after Export and closes the document, asking
 /// first when there are unsaved changes; Cancel leaves the Backstage as it was.
 #[test]

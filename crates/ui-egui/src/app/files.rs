@@ -1,6 +1,5 @@
 use super::{
-    AutoSaveBlock, AwaitingSave, PromptSave, SaveChoice, Value, WordApp, async_saves, dialogs, file_dialogs, i18n, json, keeps_everything, panes,
-    printing,
+    AutoSaveBlock, AwaitingSave, PromptSave, SaveChoice, Value, WordApp, async_saves, dialogs, file_dialogs, i18n, json, keeps_everything, printing,
 };
 
 impl WordApp {
@@ -205,9 +204,9 @@ impl WordApp {
         if !self.has_unsaved_documents() {
             return true;
         }
-        // A comment draft the document refuses is an unsaved change: the prompt can drop it.
+        // A draft the document refuses is an unsaved change: the prompt can drop it.
         if self.has_document() {
-            let _ = panes::flush_comment_drafts(self);
+            let _ = self.flush_drafts();
         }
         if !self.has_unsaved_documents() {
             return true;

@@ -144,6 +144,7 @@ impl WordApp {
             recovery_seen: false,
             no_document: None,
             comment_drafts: Default::default(),
+            alt_text_drafts: Default::default(),
             parked: Default::default(),
             windows: windows::Windows::new(shown_document),
             print_document: None,

@@ -263,7 +263,11 @@ pub(crate) fn go_to_page(app: &mut WordApp, id: &str) {
         }
         "save" => {
             let r = app.run("file.save", json!({}));
-            if r.is_ok_and(|v| v.get("saved").and_then(serde_json::Value::as_bool) == Some(true) || v.get("downloaded").is_some()) {
+            let saved = r.is_ok_and(|v| v.get("saved").and_then(serde_json::Value::as_bool) == Some(true) || v.get("downloaded").is_some());
+            // A host page that owns saving has no Save As page to offer instead (its Browse… needs
+            // the native file dialogs a browser doesn't have), and File hides the status bar that
+            // says why the save failed: go back to the document either way.
+            if saved || app.services.host_save.is_some() {
                 app.ui.backstage = false;
                 app.canvas.want_focus = true;
             } else {

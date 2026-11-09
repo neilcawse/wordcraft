@@ -31,7 +31,10 @@ pub(super) fn comments(app: &mut WordApp, ui: &mut Ui) {
                 // Editable comment text (one undo step per edit, like the balloons).
                 comment_editor(app, ui, id as u32, None, false);
                 let open_key = egui::Id::unique(("comment_reply_open", document, id));
-                let mut replying = ui.data(|d| d.get_temp::<bool>(open_key)).unwrap_or(false);
+                // The reply field is open after a click on Reply here, and whenever the comment has a
+                // reply draft: one started in a balloon has no flag here, and a refused one must not hide.
+                let has_draft = drafts(app).replies.contains_key(&(id as u32));
+                let mut replying = has_draft || ui.data(|d| d.get_temp::<bool>(open_key)).unwrap_or(false);
                 ui.horizontal(|ui| {
                     if ui.small_button(tl!("Go to")).clicked()
                         && let Some(a) = c.get("anchor").filter(|a| !a.is_null())
