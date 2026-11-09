@@ -149,6 +149,13 @@ fn handle_in(app: &mut WordApp, doc: u64, method: &str, p: &Value) -> Outcome {
             if id.starts_with("ui.") {
                 return err(format!("`{id}` works on the window: make the document active first (view.switchWindows {{\"id\": {doc}}})"));
             }
+            // Alt Text typed in that document and not yet written names its drawings and tables by
+            // position, which this edit would move behind its back: its own window writes it first.
+            if app.parked_alt_text_drafts(doc) && crate::a11y_pane::edits_alt_text_targets(app, id) {
+                return err(format!(
+                    "Alt Text is still being typed in that document: make it active first (view.switchWindows {{\"id\": {doc}}}), where the edit writes it"
+                ));
+            }
             // Close, with the same guard as the window's: unsaved changes need `force`.
             if id == "file.close" {
                 let force = params.get("force").and_then(Value::as_bool) == Some(true);

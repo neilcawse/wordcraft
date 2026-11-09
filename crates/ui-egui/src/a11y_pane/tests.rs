@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use egui::accesskit::Role;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 use wordcraft_doc::para::OBJ;
 use wordcraft_doc::{Document, Pos, StoryRef};
@@ -32,7 +32,15 @@ fn shape_app(path: &std::path::Path) -> WordApp {
 
 /// A saved document with a table, the caret in its first cell, and the Alt Text pane open.
 fn table_app(path: &std::path::Path) -> WordApp {
+    table_app_after("", path)
+}
+
+/// The same, with a paragraph of `intro` above the table (none when it is empty).
+fn table_app_after(intro: &str, path: &std::path::Path) -> WordApp {
     let mut a = WordApp::new(Session::new(Document::new()), Services::default());
+    if !intro.is_empty() {
+        a.run("text.insert", json!({"text": intro})).unwrap();
+    }
     a.run("insert.table", json!({"rows": 2, "cols": 2})).unwrap();
     let cell = a.session.doc.para_paths(StoryRef::Body).into_iter().find(|p| p.cell().is_some()).expect("the table has a cell");
     a.session.sel = Selection::caret(Pos { story: StoryRef::Body, path: cell, off: 0 });
@@ -43,9 +51,18 @@ fn table_app(path: &std::path::Path) -> WordApp {
 }
 
 fn harness(a: WordApp) -> Harness {
+    harness_sized(a, egui::vec2(1440.0, 900.0))
+}
+
+/// Wide enough for the ribbon's Size group to keep its Alt box beside the pane.
+fn wide_harness(a: WordApp) -> Harness {
+    harness_sized(a, egui::vec2(1800.0, 900.0))
+}
+
+fn harness_sized(a: WordApp, size: egui::Vec2) -> Harness {
     // The pane's fields sit under a label of their own and have no accessible name, so the
     // harness's check for unnamed widgets is off.
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_accessibility_check(false).build_ui_state(
+    let mut h = egui_kittest::Harness::builder().with_size(size).with_accessibility_check(false).build_ui_state(
         |ui, app: &mut WordApp| {
             let ctx = ui.ctx().clone();
             app.logic(&ctx);
@@ -400,4 +417,221 @@ fn typed_alt_text_stays_with_its_document() {
     h.run_steps(4);
     assert_eq!(shown(&h, MULTI, 0), TYPED, "it is back with its document");
     let _ = std::fs::remove_file(&path);
+}
+
+/// A saved document with an ellipse and a rectangle after its text, the ellipse selected and the
+/// Alt Text pane open; the drawings' positions.
+fn two_shapes_app(path: &std::path::Path) -> (WordApp, Vec<Pos>) {
+    let mut a = shape_app(path);
+    a.run("insert.shape", json!({"kind": "rectangle"})).unwrap();
+    a.run("file.save", json!({})).unwrap();
+    let objects = drawing_positions(&a.session.doc);
+    assert_eq!(objects.len(), 2, "two shapes");
+    select_object(&mut a, &objects[0]);
+    (a, objects)
+}
+
+/// A saved document holding a picture, selected, with the Picture Format tab shown.
+fn picture_app(path: &std::path::Path) -> WordApp {
+    let mut a = WordApp::new(Session::new(Document::new()), Services::default());
+    let pixels = image::RgbaImage::from_pixel(20, 10, image::Rgba([200, 30, 30, 255]));
+    let mut png = Vec::new();
+    pixels.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    a.run("insert.picture", json!({"data": wordcraft_engine::cmd::insert::base64_encode(&png)})).unwrap();
+    a.run("ui.tab", json!({"tab": "Picture Format"})).unwrap();
+    a.run("file.save", json!({"path": path.to_string_lossy()})).unwrap();
+    assert!(!a.session.dirty, "saved");
+    a
+}
+
+/// The Alt box in Picture Format's Size group: a one-line field with the hint "Alt text".
+fn ribbon_alt(h: &Harness) -> egui_kittest::Node<'_> {
+    h.get_all_by_role(SINGLE).find(|n| n.accesskit_node().data().placeholder() == Some("Alt text")).expect("the Size group has the Alt box")
+}
+
+/// Click into the ribbon's Alt box and type `text`, leaving the keyboard focus in it.
+fn type_in_ribbon(h: &mut Harness, text: &str) {
+    ribbon_alt(h).focus();
+    h.run_steps(2);
+    ribbon_alt(h).type_text(text);
+    h.run_steps(3);
+    assert_eq!(ribbon_alt(h).value().unwrap_or_default(), text, "the box shows what was typed");
+    assert!(ribbon_alt(h).is_focused(), "and keeps the keyboard");
+}
+
+/// A description typed for a drawing names its position until it is written, and typing before
+/// the drawing moves it: the description goes with its drawing, not lost with the position.
+#[test]
+fn alt_text_typed_for_a_drawing_goes_with_it_when_text_is_inserted_before_it() {
+    let path = temp_docx("insert-before");
+    let (a, objects) = two_shapes_app(&path);
+    let mut h = harness(a);
+    type_in(&mut h, MULTI, 0, TYPED);
+    h.state_mut().run("view.altTextPane", json!({"value": false})).unwrap();
+    h.run_steps(3);
+    h.state_mut().session.sel = Selection::caret(Pos { off: 0, ..objects[0].clone() });
+    h.state_mut().run("text.insert", json!({"text": "prefix "})).unwrap();
+    let moved = drawing_positions(&h.state().session.doc);
+    assert_eq!(moved[0].off, objects[0].off + "prefix ".len(), "both drawings moved right");
+    assert!(!super::has_alt_text_drafts(h.state()), "the description was entered before the text, with its drawing");
+    h.state_mut().run("file.save", json!({})).unwrap();
+    assert!(!h.state().has_unsaved_documents());
+    assert_eq!(alt_texts(&saved(&path)), [TYPED, ""], "the ellipse has it, the rectangle doesn't");
+}
+
+/// Deleting the drawing a description was typed for moves the next drawing into its position:
+/// the description is not given to it.
+#[test]
+fn alt_text_typed_for_a_deleted_drawing_is_not_given_to_the_one_that_takes_its_place() {
+    let path = temp_docx("delete-owner");
+    let (a, _) = two_shapes_app(&path);
+    let mut h = harness(a);
+    type_in(&mut h, MULTI, 0, TYPED);
+    h.state_mut().run("view.altTextPane", json!({"value": false})).unwrap();
+    h.run_steps(3);
+    h.state_mut().run("text.delete", json!({})).unwrap();
+    assert_eq!(drawing_positions(&h.state().session.doc).len(), 1, "the ellipse is gone");
+    assert!(!super::has_alt_text_drafts(h.state()), "the description went with it");
+    h.state_mut().run("file.save", json!({})).unwrap();
+    assert_eq!(alt_texts(&saved(&path)), [""], "the rectangle that took its position has no description");
+}
+
+/// A table is named by its path, which a paragraph inserted above it changes.
+#[test]
+fn a_table_title_typed_for_a_table_goes_with_it_when_a_paragraph_is_inserted_above() {
+    let path = temp_docx("table-shift");
+    let mut h = harness(table_app_after("Intro", &path));
+    type_in(&mut h, SINGLE, 0, "Q3 figures");
+    h.state_mut().run("view.altTextPane", json!({"value": false})).unwrap();
+    h.run_steps(3);
+    let first = h.state().session.doc.para_paths(StoryRef::Body).into_iter().next().expect("a paragraph");
+    assert!(first.cell().is_none(), "the table has a paragraph above it");
+    h.state_mut().session.sel = Selection::caret(Pos { story: StoryRef::Body, path: first, off: 0 });
+    h.state_mut().run("text.newParagraph", json!({})).unwrap();
+    assert!(!super::has_alt_text_drafts(h.state()), "the title was entered before the paragraph, with its table");
+    h.state_mut().run("file.save", json!({})).unwrap();
+    assert_eq!(table_texts(&saved(&path)).0.as_deref(), Some("Q3 figures"));
+}
+
+/// The Alt box in Picture Format's Size group is a second way to type a picture's description,
+/// and typed there it is unsaved work the page would lose.
+#[test]
+fn typed_ribbon_alt_text_counts_as_unsaved_work() {
+    let path = temp_docx("ribbon-dirty");
+    let reported = Rc::new(Cell::new(None));
+    let mut a = picture_app(&path);
+    let seen = reported.clone();
+    a.services.on_dirty = Some(Box::new(move |d| seen.set(Some(d))));
+    let mut h = wide_harness(a);
+    assert_eq!(reported.get(), Some(false), "nothing to lose yet");
+    type_in_ribbon(&mut h, TYPED);
+    assert!(h.state().has_unsaved_documents(), "the typed description is unsaved work");
+    assert_eq!(reported.get(), Some(true), "the host is told, so closing the tab asks first");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Save with the keyboard still in the ribbon's box writes what was typed.
+#[test]
+fn saving_while_the_ribbon_alt_box_has_focus_writes_what_was_typed() {
+    let path = temp_docx("ribbon-save");
+    let mut h = wide_harness(picture_app(&path));
+    type_in_ribbon(&mut h, TYPED);
+    h.state_mut().run("file.save", json!({})).unwrap();
+    assert!(!h.state().session.dirty, "saved");
+    assert!(!h.state().has_unsaved_documents(), "and nothing is left to lose");
+    assert_eq!(alt_texts(&saved(&path)), [TYPED], "the file has the description");
+}
+
+/// Leaving the tab hides the box without it noticing it lost the keyboard; what was typed stays.
+#[test]
+fn the_ribbon_alt_text_survives_leaving_the_tab() {
+    let path = temp_docx("ribbon-tab");
+    let mut h = wide_harness(picture_app(&path));
+    type_in_ribbon(&mut h, TYPED);
+    h.state_mut().run("ui.tab", json!({"tab": "Home"})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().has_unsaved_documents(), "it is still unsaved work");
+    h.state_mut().run("file.save", json!({})).unwrap();
+    assert_eq!(alt_texts(&saved(&path)), [TYPED]);
+}
+
+/// Close asks Save / Don't Save / Cancel about it: Cancel keeps it, Don't Save drops it.
+#[test]
+fn closing_with_ribbon_alt_text_asks_to_save() {
+    let path = temp_docx("ribbon-close");
+    let mut h = wide_harness(picture_app(&path));
+    type_in_ribbon(&mut h, TYPED);
+    assert!(!h.state_mut().close_requested(), "the typed description is an unsaved change");
+    assert!(matches!(h.state().dialog, Some(crate::dialogs::Dialog::SaveChanges { .. })), "so the close asks");
+    h.state_mut().run("ui.saveChanges", json!({"answer": "cancel"})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().has_document() && h.state().has_unsaved_documents(), "Cancel keeps the document and what was typed");
+    assert_eq!(ribbon_alt(&h).value().unwrap_or_default(), TYPED);
+    assert!(!h.state_mut().close_requested(), "asked again");
+    h.state_mut().run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
+    assert!(h.state_mut().close_requested(), "Don't Save closes");
+    assert_eq!(alt_texts(&saved(&path)), [""], "and the file keeps its old description");
+}
+
+/// One description has one draft, whichever box it is typed in: the ribbon's and the pane's show
+/// each other's text.
+#[test]
+fn the_ribbon_and_the_pane_edit_one_alt_text_draft() {
+    let path = temp_docx("ribbon-pane");
+    let mut a = picture_app(&path);
+    a.run("view.altTextPane", json!({"value": true})).unwrap();
+    let mut h = wide_harness(a);
+    type_in(&mut h, MULTI, 0, "From the pane");
+    assert_eq!(ribbon_alt(&h).value().unwrap_or_default(), "From the pane", "the ribbon's box shows what the pane has");
+    assert_eq!(h.state().alt_text_drafts.fields.len(), 1, "one draft");
+    let _ = std::fs::remove_file(&path);
+
+    let path = temp_docx("ribbon-pane2");
+    let mut a = picture_app(&path);
+    a.run("view.altTextPane", json!({"value": true})).unwrap();
+    let mut h = wide_harness(a);
+    type_in_ribbon(&mut h, "From the ribbon");
+    assert_eq!(shown(&h, MULTI, 0), "From the ribbon", "the pane shows what the ribbon's box has");
+    assert_eq!(h.state().alt_text_drafts.fields.len(), 1, "one draft");
+    h.state_mut().run("file.save", json!({})).unwrap();
+    assert_eq!(alt_texts(&saved(&path)), ["From the ribbon"]);
+}
+
+/// A script's edit addressed to a document that is not shown would move the drawings its typed
+/// Alt Text names behind its back: it waits until the document is shown, where the edit writes the
+/// description first. Queries go on.
+#[test]
+fn an_edit_addressed_to_a_background_document_with_typed_alt_text_waits_for_its_window() {
+    use crate::control::{ControlRequest, Outcome, handle};
+    let path = temp_docx("background");
+    let mut a = shape_app(&path);
+    // The web app's one window shows each document in turn.
+    a.windows.single();
+    let first = a.session.document_id();
+    let mut h = harness(a);
+    type_in(&mut h, MULTI, 0, TYPED);
+    h.state_mut().run("file.new", json!({})).unwrap();
+    h.run_steps(4);
+    assert_ne!(h.state().session.document_id(), first, "another document is shown");
+    let ctx = h.ctx.clone();
+    let send = |h: &mut Harness, id: &str| {
+        let (req, _reply) = ControlRequest::new("engine.execute", json!({"command": id, "params": {"text": "x"}, "doc": first}));
+        match handle(h.state_mut(), &ctx, &req) {
+            Outcome::Done(v) => v,
+            _ => panic!("a reply"),
+        }
+    };
+    let refused = send(&mut h, "text.insert");
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(refused["error"].as_str().is_some_and(|e| e.contains("Alt Text")), "{refused}");
+    assert!(h.state().has_unsaved_documents(), "the description is still there");
+    assert_eq!(send(&mut h, "document.inspect")["ok"], true, "a query moves nothing");
+
+    h.state_mut().run("view.switchWindows", json!({"id": first})).unwrap();
+    h.run_steps(4);
+    let at = drawing_positions(&h.state().session.doc)[0].clone();
+    h.state_mut().session.sel = Selection::caret(Pos { off: 0, ..at });
+    h.state_mut().run("text.insert", json!({"text": "x"})).unwrap();
+    h.state_mut().run("file.save", json!({})).unwrap();
+    assert_eq!(alt_texts(&saved(&path)), [TYPED], "shown, the edit wrote the description first");
 }

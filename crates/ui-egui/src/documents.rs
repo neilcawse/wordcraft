@@ -42,6 +42,12 @@ impl WordApp {
         self.sync_document();
     }
 
+    /// Whether open document `id`, which is not the shown one, has Alt Text typed and not yet
+    /// written to it.
+    pub(crate) fn parked_alt_text_drafts(&self, id: u64) -> bool {
+        self.parked.get(&id).is_some_and(|p| !p.alt_text_drafts.is_empty())
+    }
+
     /// Follow the session's active document. When it isn't the one the window last showed, the
     /// shown document's own state is put aside (or dropped, if it was closed or replaced), the
     /// new one's comes back, and the window's state about the page that was shown starts afresh

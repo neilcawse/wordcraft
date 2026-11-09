@@ -125,9 +125,9 @@ pub(super) fn picture_format(app: &mut WordApp, ui: &mut Ui) {
     });
     // The launcher opens the Size dialog: scale, Lock aspect ratio, the original size (#2573).
     group(ui, "Size", Some("picture.size"), app, |ui, app| {
-        let (media, off, w0, h0, crop0, alt0) = match wordcraft_engine::cmd::objects::selected(&app.session) {
-            Some((pos, wordcraft_doc::para::InlineObject::Image { media, w, h, alt, crop, .. })) => (media, pos.off, w, h, crop, alt),
-            _ => (String::new(), 0, 0.0, 0.0, [0.0; 4], String::new()),
+        let (w0, h0, crop0) = match wordcraft_engine::cmd::objects::selected(&app.session) {
+            Some((_, wordcraft_doc::para::InlineObject::Image { w, h, crop, .. })) => (w, h, crop),
+            _ => (0.0, 0.0, [0.0; 4]),
         };
         // `picture.size` locks the aspect ratio unless told otherwise, so one dimension suffices.
         // The fields show the interface unit and take a size typed in any unit, pixels too
@@ -191,22 +191,7 @@ pub(super) fn picture_format(app: &mut WordApp, ui: &mut Ui) {
             ui.add_space(2.0);
             crate::widgets::row(ui, |ui| {
                 ui.label(egui::RichText::new(tl!("Alt:")).small());
-                // Frame-local buffers lose keystrokes; keep the draft in egui temp memory keyed
-                // by picture (same pattern as the comment editor in panes.rs).
-                let key = egui::Id::unique(("picture_alt", media.clone(), off));
-                let mut alt = ui.data(|d| d.get_temp::<String>(key)).unwrap_or_else(|| alt0.clone());
-                let r = ui.add(egui::TextEdit::singleline(&mut alt).desired_width(120.0).hint_text(tl!("Alt text")));
-                if r.changed() {
-                    ui.data_mut(|d| d.insert_temp(key, alt.clone()));
-                }
-                if r.lost_focus() {
-                    ui.data_mut(|d| d.remove::<String>(key));
-                    // The click that took focus may have selected another picture; never commit
-                    // one picture's draft onto another.
-                    if alt != alt0 && app.selected_picture_media().as_deref() == Some(media.as_str()) {
-                        let _ = app.run("picture.altText", json!({"text": alt}));
-                    }
-                }
+                crate::a11y_pane::picture_alt_box(app, ui);
             });
         });
     });

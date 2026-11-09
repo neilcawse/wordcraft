@@ -96,7 +96,7 @@ pub fn alt_text(app: &mut WordApp, ui: &mut Ui) {
         ui.add_space(4.0);
         // Read-only where Alt Text can't change (a protected document), so nothing is typed in vain.
         let editable = !decorative && crate::widgets::enabled(app, "object.altText");
-        draft_box(app, ui, AltField::Object(pos), obj.alt_text(), editable, true);
+        draft_box(app, ui, AltField::Object(pos), obj.alt_text(), editable, Look::Pane { multiline: true });
         ui.add_space(6.0);
         let mut d = decorative;
         if ui.checkbox(&mut d, tl!("Mark as decorative")).changed() {
@@ -115,17 +115,39 @@ pub fn alt_text(app: &mut WordApp, ui: &mut Ui) {
         ui.label(egui::RichText::new(tl!("Describe what this table shows, for people who can't see it.")).weak());
         ui.add_space(4.0);
         ui.label(tl!("Title:"));
-        draft_box(app, ui, AltField::TableTitle(focus.story, tp.clone()), caption.as_deref().unwrap_or(""), editable, false);
+        draft_box(
+            app,
+            ui,
+            AltField::TableTitle(focus.story, tp.clone()),
+            caption.as_deref().unwrap_or(""),
+            editable,
+            Look::Pane { multiline: false },
+        );
         ui.add_space(4.0);
         ui.label(tl!("Description:"));
-        draft_box(app, ui, AltField::TableText(focus.story, tp), description.as_deref().unwrap_or(""), editable, true);
+        draft_box(app, ui, AltField::TableText(focus.story, tp), description.as_deref().unwrap_or(""), editable, Look::Pane { multiline: true });
         return;
     }
     ui.label(egui::RichText::new(tl!("Select a picture, shape, chart or table to describe it.")).weak());
 }
 
+/// Picture Format › Size › Alt: the selected picture's description on one short line. It edits the
+/// same draft as the pane's description ([`AltField::Object`]), so the two boxes show and extend the
+/// same text, and it is counted, saved and kept as the pane's is.
+pub(crate) fn picture_alt_box(app: &mut WordApp, ui: &mut Ui) {
+    let Some((pos, obj)) = wordcraft_engine::cmd::objects::selected(&app.session) else {
+        ui.add_enabled(false, egui::TextEdit::singleline(&mut String::new()).desired_width(RIBBON_BOX_WIDTH).hint_text(tl!("Alt text")));
+        return;
+    };
+    let editable = !obj.is_decorative() && crate::widgets::enabled(app, "object.altText");
+    draft_box(app, ui, AltField::Object(pos), obj.alt_text(), editable, Look::Ribbon);
+}
+
 /// What an Alt Text field edits, and so what its draft is kept under: an object is named by its
-/// position, a table by its story and its path.
+/// position, a table by its story and its path. The document gives a drawing or a table no
+/// identity of its own, and an edit can move, remove or replace what is at a position, so a draft
+/// is written before any command that edits the document ([`flush_before_edit`]), never kept
+/// across one.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum AltField {
     /// The description of the picture, shape, text box, chart or group at a position.
@@ -136,15 +158,17 @@ enum AltField {
     TableText(StoryRef, Path),
 }
 
-/// What has been typed in the Alt Text pane's fields but not yet written to the document, as
-/// [`crate::panes::CommentDrafts`] does for comments. A field writes its text back when it loses
-/// focus, but the keyboard can still be in it when the page closes, when a Save is made, when
-/// the pane is hidden or File opens, and a field that is not drawn notices nothing. So the draft
-/// is the app's: it counts as unsaved work, outlives the pane, and every command that saves or
-/// replaces the document writes it first ([`WordApp::flush_drafts`]). Drafts belong to one
-/// document ([`Session::document_id`](wordcraft_engine::Session::document_id)): when another
-/// document replaces it they are dropped, so an object there at the same position never shows
-/// them. A draft is removed only once its command succeeds; a refused edit keeps it.
+/// What has been typed in the Alt Text fields (the pane's, and Picture Format's) but not yet
+/// written to the document, as [`crate::panes::CommentDrafts`] does for comments. A field writes
+/// its text back when it loses focus, but the keyboard can still be in it when the page closes,
+/// when a Save is made, when the pane is hidden or File opens, and a field that is not drawn
+/// notices nothing. So the draft is the app's, one per field whichever box edits it: it counts as
+/// unsaved work, outlives the box, and every command that saves or replaces the document writes
+/// it first ([`WordApp::flush_drafts`]), as does every command that edits the document
+/// ([`flush_before_edit`]). Drafts belong to one document
+/// ([`Session::document_id`](wordcraft_engine::Session::document_id)): when another document
+/// replaces it they are dropped, so an object there at the same position never shows them. A
+/// draft is removed only once its command succeeds; a refused edit keeps it.
 #[derive(Default)]
 pub(crate) struct AltTextDrafts {
     document: u64,
@@ -179,17 +203,35 @@ fn drafts(app: &mut WordApp) -> &mut AltTextDrafts {
     app.alt_text_drafts.of(document)
 }
 
+/// How an Alt Text box looks.
+#[derive(Clone, Copy)]
+enum Look {
+    /// In the pane: as wide as the pane, and a description wraps over several rows.
+    Pane { multiline: bool },
+    /// In the ribbon's Size group: one short line, with a hint.
+    Ribbon,
+}
+
+/// The width of the ribbon's box, points.
+const RIBBON_BOX_WIDTH: f32 = 120.0;
+
 /// A text box editing `field`, whose text in the document is `current`. Typing stays in a draft
-/// until the box loses focus, or a command that saves or replaces the document writes it
-/// ([`flush_alt_text_drafts`]); frame-local buffers lose keystrokes. A refusal is on the status
-/// line, and the draft stays in the box.
-fn draft_box(app: &mut WordApp, ui: &mut Ui, field: AltField, current: &str, enabled: bool, multiline: bool) {
+/// until the box loses focus, or a command that saves, replaces or edits the document writes it
+/// ([`flush_alt_text_drafts`], [`flush_before_edit`]); frame-local buffers lose keystrokes. The
+/// draft is the app's, one per field: the pane's box and the ribbon's edit the same one. A refusal
+/// is on the status line, and the draft stays in the box.
+fn draft_box(app: &mut WordApp, ui: &mut Ui, field: AltField, current: &str, enabled: bool, look: Look) {
     let mut text = drafts(app).fields.get(&field).map_or_else(|| current.to_string(), Clone::clone);
     // Per document: egui's own state for the box (its cursor and undo history) never carries over
-    // to another document's object at the same position.
+    // to another document's object at the same position. The pane's box and the ribbon's sit in
+    // different places, so each keeps its own.
     let id = ui.scope_id().with((app.session.document_id(), &field));
-    let edit = if multiline { egui::TextEdit::multiline(&mut text).desired_rows(5) } else { egui::TextEdit::singleline(&mut text) };
-    let r = ui.add_enabled(enabled, edit.id(id).desired_width(f32::INFINITY));
+    let edit = match look {
+        Look::Pane { multiline: true } => egui::TextEdit::multiline(&mut text).desired_rows(5).desired_width(f32::INFINITY),
+        Look::Pane { multiline: false } => egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY),
+        Look::Ribbon => egui::TextEdit::singleline(&mut text).desired_width(RIBBON_BOX_WIDTH).hint_text(tl!("Alt text")),
+    };
+    let r = ui.add_enabled(enabled, edit.id(id));
     if r.changed() {
         // Typing back what the document has leaves nothing to write.
         if text == current {
@@ -276,6 +318,28 @@ pub(crate) fn flush_alt_text_drafts(app: &mut WordApp) -> Result<(), String> {
         }
     }
     first
+}
+
+/// Whether the command `id` can move, remove or replace a drawing or a table: it edits the
+/// document, and is not one of the Alt Text commands that write a draft. Commands that only
+/// select, view, open or save change no position.
+pub(crate) fn edits_alt_text_targets(app: &WordApp, id: &str) -> bool {
+    !matches!(id, "object.altText" | "picture.altText" | "table.altText") && app.session.registry.get(id).is_some_and(|c| c.mutates)
+}
+
+/// Before the command `id` runs: write the Alt Text typed and not yet written, if the command
+/// edits the document. A draft names its drawing or table by position, which an insertion, a
+/// deletion, an undo or a paste can move; kept across the edit, the description would be lost, or
+/// given to whatever comes to be there. Written first, it is the object's own and goes where the
+/// object goes. A draft the document refuses stays, with the refusal on the status line.
+pub(crate) fn flush_before_edit(app: &mut WordApp, id: &str) {
+    if !has_alt_text_drafts(app) || !edits_alt_text_targets(app, id) {
+        return;
+    }
+    // The write is its own edit, not a step of an input method's composition under way.
+    let ime = std::mem::replace(&mut app.ime_origin, false);
+    let _ = flush_alt_text_drafts(app);
+    app.ime_origin = ime;
 }
 
 #[cfg(test)]

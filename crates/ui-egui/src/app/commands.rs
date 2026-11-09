@@ -209,6 +209,9 @@ impl WordApp {
             }
             return Ok(json!({"downloaded": name, "bytes": bytes.len()}));
         }
+        // Alt Text typed and not yet written names its drawing or table by position, which the
+        // command about to run may move: write it first (the control channel's commands too).
+        crate::a11y_pane::flush_before_edit(self, id);
         let document = self.session.document_id();
         let body_epoch = self.session.ime_body_epoch();
         let math_session = self.session.math.as_ref().map(|m| m.session);
