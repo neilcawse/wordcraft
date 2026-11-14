@@ -1,7 +1,5 @@
 //! Lenient number parsing for OOXML attribute values.
 
-use crate::xml::El;
-
 /// Largest absolute length we accept, points (beyond any real page: 200 inches).
 pub const MAX_LEN_PT: f32 = 14_400.0;
 
@@ -102,56 +100,8 @@ pub fn vml_number(s: &str) -> Option<f64> {
     v.is_finite().then_some(v)
 }
 
-/// A picture's brightness, contrast and transparency: `a:lum` (ECMA-376 §20.1.8.42) and
-/// `a:alphaModFix` (§20.1.8.4) in its `a:blip` (#1766).
-pub fn blip_fx(blip: &El) -> wordcraft_doc::picfx::PicFx {
-    let val = |el: Option<&El>, k: &str| el.and_then(|e| e.attr(k)).and_then(int).map(|v| v.clamp(-1_000_000, 1_000_000) as i32);
-    let lum = blip.child("a:lum");
-    let amt = val(blip.child("a:alphaModFix"), "amt").unwrap_or(100_000).clamp(0, 100_000);
-    wordcraft_doc::picfx::PicFx::new(val(lum, "bright").unwrap_or(0), val(lum, "contrast").unwrap_or(0), 100_000 - amt)
-}
-
 pub fn u32_of(s: &str) -> Option<u32> {
     int(s).map(|v| v.clamp(0, u32::MAX as i64) as u32)
-}
-
-/// Twips attribute → points.
-pub fn tw(e: &El, attr: &str) -> Option<f32> {
-    e.attr(attr).and_then(|v| measure(v, 20.0))
-}
-
-/// Signed twips Word keeps in 16 bits (paragraph and list indents, ECMA-376 Part 1 §17.3.1.12):
-/// a plain integer outside `i16` keeps its low 16 bits, two's complement, as Word reads it
-/// (66256 → 720). Values with a unit or a fraction read as [`tw`].
-pub fn tw_i16(e: &El, attr: &str) -> Option<f32> {
-    let v = e.attr(attr)?;
-    match v.trim().parse::<i64>() {
-        Ok(i) => Some(f32::from(i as i16) / 20.0),
-        Err(_) => measure(v, 20.0),
-    }
-}
-
-/// Unsigned twips Word keeps in 16 bits (paragraph spacing, §17.3.1.33): a plain integer above
-/// 65535 keeps its low 16 bits (65537 → 1). Other values read as [`tw`].
-pub fn tw_u16(e: &El, attr: &str) -> Option<f32> {
-    let v = e.attr(attr)?;
-    match v.trim().parse::<i64>() {
-        Ok(i) if i > 0xFFFF => Some(f32::from((i & 0xFFFF) as u16) / 20.0),
-        _ => measure(v, 20.0),
-    }
-}
-
-/// ST_OnOff: absent `w:val` = on; `0`, `false`, `off` = off.
-pub fn on_off(e: &El) -> bool {
-    match e.attr("w:val") {
-        None => true,
-        Some(v) => !matches!(v.trim(), "0" | "false" | "off" | "False" | "FALSE"),
-    }
-}
-
-/// An on/off child of `parent`, if present.
-pub fn flag(parent: &El, name: &str) -> Option<bool> {
-    parent.child(name).map(on_off)
 }
 
 /// Format a number for an attribute: integers without a fraction.
@@ -172,24 +122,6 @@ pub fn emu(pt: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn twips_beyond_16_bits_wrap() {
-        let el = |a: &str| El { attrs: vec![("w:v".into(), a.into())], ..El::default() };
-        let s = |a: &str| tw_i16(&el(a), "w:v");
-        let u = |a: &str| tw_u16(&el(a), "w:v");
-        assert_eq!(s("66256"), Some(36.0));
-        assert_eq!(s("-65516"), Some(1.0));
-        assert_eq!(s("98304"), Some(-1638.4));
-        assert_eq!(s("32767"), Some(1638.35));
-        assert_eq!(s("-32768"), Some(-1638.4));
-        assert_eq!(s("1in"), Some(72.0));
-        assert_eq!(s("x"), None);
-        assert_eq!(u("65537"), Some(0.05));
-        assert_eq!(u("65535"), Some(3276.75));
-        assert_eq!(u("12pt"), Some(12.0));
-        assert_eq!(u("-20"), Some(-1.0));
-    }
 
     /// Standard unit conversions and `w:line` auto-multiple parsing.
     #[test]
@@ -218,7 +150,7 @@ mod tests {
     #[test]
     fn measures_round_fractional_file_units() {
         assert_eq!(measure("398.4", 240.0), measure("398", 240.0));
-        assert_eq!(measure("398.5", 240.0), measure("399", 240.0));
+        assert_eq!(measure("398.5", 240.0), measure("399", 20.0 / 20.0 * 240.0));
         assert_eq!(measure("-398.4", 20.0), measure("-398", 20.0));
         assert_eq!(measure("-398.5", 20.0), measure("-399", 20.0));
         assert_eq!(measure("12.3", 1.0), Some(12.3));
