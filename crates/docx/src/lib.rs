@@ -33,12 +33,12 @@ fn normalize_deep_groups_xml(xml: &str) -> Option<String> {
                     skip_grp_meta_depth += 1;
                 } else if is_grp {
                     group_depth += 1;
-                    if group_depth == 1 {
+                    if group_depth <= 8 {
                         writer.write_event(quick_xml::events::Event::Start(e)).ok()?;
                     } else {
                         changed = true;
                     }
-                } else if (group_depth > 1 && (name.as_ref() == b"wpg:cNvGrpSpPr" || name.as_ref() == b"wpg:grpSpPr"))
+                } else if (group_depth > 8 && (name.as_ref() == b"wpg:cNvGrpSpPr" || name.as_ref() == b"wpg:grpSpPr"))
                     || group_depth > MAX_DML_GROUP_DEPTH + 1
                 {
                     skip_grp_meta_depth = 1;
@@ -51,8 +51,8 @@ fn normalize_deep_groups_xml(xml: &str) -> Option<String> {
                 let name = e.name();
                 let is_grp = name.as_ref() == b"wpg:wgp" || name.as_ref() == b"wpg:grpSp";
                 if skip_grp_meta_depth > 0
-                    || (is_grp && group_depth >= 1)
-                    || (group_depth > 1 && (name.as_ref() == b"wpg:cNvGrpSpPr" || name.as_ref() == b"wpg:grpSpPr"))
+                    || (is_grp && group_depth >= 8)
+                    || (group_depth > 8 && (name.as_ref() == b"wpg:cNvGrpSpPr" || name.as_ref() == b"wpg:grpSpPr"))
                     || group_depth > MAX_DML_GROUP_DEPTH + 1
                 {
                     changed = true;
@@ -66,7 +66,7 @@ fn normalize_deep_groups_xml(xml: &str) -> Option<String> {
                 if skip_grp_meta_depth > 0 {
                     skip_grp_meta_depth -= 1;
                 } else if is_grp {
-                    if group_depth == 1 {
+                    if group_depth <= 8 {
                         writer.write_event(quick_xml::events::Event::End(e)).ok()?;
                     }
                     group_depth = group_depth.saturating_sub(1);
