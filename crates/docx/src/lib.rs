@@ -4,8 +4,11 @@
 //! between the shared `craft-wordmodel` and WordCraft's application document model.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod field_fidelity;
 mod fit;
 mod model_bridge;
+mod pic_fidelity;
+mod table_revisions;
 pub mod units;
 
 /// Maximum nesting depth of DrawingML `wpg:wgp` / `wpg:grpSp` groups inside a top-level group:
@@ -163,8 +166,14 @@ pub fn read_with(bytes: &[u8], opts: &ReadOptions) -> Result<wordcraft_doc::Docu
 
     let rewritten = preprocess_deep_groups(bytes);
     let bytes = rewritten.as_deref().unwrap_or(bytes);
-    let shared = craft_docx::read_with(bytes, &shared_opts)?;
-    from_shared_model(shared)
+    let (forms, rewritten_fields) = field_fidelity::preprocess_read(bytes);
+    let read_bytes = rewritten_fields.as_deref().unwrap_or(bytes);
+    let shared = craft_docx::read_with(read_bytes, &shared_opts)?;
+    let mut doc = from_shared_model(shared)?;
+    field_fidelity::postprocess_read(&mut doc, &forms);
+    pic_fidelity::apply_read_extras(bytes, &mut doc);
+    table_revisions::apply_read_table_revs(bytes, &mut doc);
+    Ok(doc)
 }
 
 /// Read a Word XML file (`.xml`).
@@ -174,15 +183,21 @@ pub fn read_xml(bytes: &[u8]) -> Result<wordcraft_doc::Document, DocxError> {
 }
 
 /// Write a document as `.docx`.
+fn apply_all_write_extras(doc: &wordcraft_doc::Document, bytes: Vec<u8>) -> Vec<u8> {
+    let bytes = field_fidelity::postprocess_write(doc, bytes);
+    let bytes = pic_fidelity::apply_write_extras(doc, bytes);
+    table_revisions::apply_write_table_revs(doc, bytes)
+}
+
 pub fn write(doc: &wordcraft_doc::Document) -> Result<Vec<u8>, DocxError> {
     let shared = to_shared_model(doc)?;
-    craft_docx::write(&shared)
+    craft_docx::write(&shared).map(|bytes| apply_all_write_extras(doc, bytes))
 }
 
 /// Write a document with a specific package flavor.
 pub fn write_as(doc: &wordcraft_doc::Document, flavor: Flavor) -> Result<Vec<u8>, DocxError> {
     let shared = to_shared_model(doc)?;
-    craft_docx::write_as(&shared, flavor)
+    craft_docx::write_as(&shared, flavor).map(|bytes| apply_all_write_extras(doc, bytes))
 }
 
 /// Write a document as a Flat OPC XML file.
