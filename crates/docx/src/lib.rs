@@ -7,6 +7,7 @@
 mod fit;
 mod model_bridge;
 mod pic_fidelity;
+mod table_revisions;
 
 pub use craft_docx::{
     DEFAULT_SPIN_COUNT, DocxError, EmbeddedFont, Flavor, MAX_PASSWORD_CHARS, MAX_SOURCES, MAX_XML_FILE, PASSWORD_REQUIRED, PasswordCheck,
@@ -67,6 +68,7 @@ pub fn read_with(bytes: &[u8], opts: &ReadOptions) -> Result<wordcraft_doc::Docu
     let shared = craft_docx::read_with(bytes, &shared_opts)?;
     let mut doc = from_shared_model(shared)?;
     pic_fidelity::apply_read_extras(bytes, &mut doc);
+    table_revisions::apply_read_table_revs(bytes, &mut doc);
     Ok(doc)
 }
 
@@ -79,13 +81,13 @@ pub fn read_xml(bytes: &[u8]) -> Result<wordcraft_doc::Document, DocxError> {
 /// Write a document as `.docx`.
 pub fn write(doc: &wordcraft_doc::Document) -> Result<Vec<u8>, DocxError> {
     let shared = to_shared_model(doc)?;
-    craft_docx::write(&shared).map(|bytes| pic_fidelity::apply_write_extras(doc, bytes))
+    craft_docx::write(&shared).map(|bytes| table_revisions::apply_write_table_revs(doc, pic_fidelity::apply_write_extras(doc, bytes)))
 }
 
 /// Write a document with a specific package flavor.
 pub fn write_as(doc: &wordcraft_doc::Document, flavor: Flavor) -> Result<Vec<u8>, DocxError> {
     let shared = to_shared_model(doc)?;
-    craft_docx::write_as(&shared, flavor).map(|bytes| pic_fidelity::apply_write_extras(doc, bytes))
+    craft_docx::write_as(&shared, flavor).map(|bytes| table_revisions::apply_write_table_revs(doc, pic_fidelity::apply_write_extras(doc, bytes)))
 }
 
 /// Write a document as a Flat OPC XML file.
