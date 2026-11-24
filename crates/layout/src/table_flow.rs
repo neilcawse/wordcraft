@@ -283,7 +283,8 @@ pub(crate) fn place_table(ctx: &mut Ctx, pb: &mut PageBuilder, t: &wordcraft_doc
                         return false;
                     }
                     let (Some(next), Some(laid)) = (t.rows.get(end), tl.rows.get(end)) else { return false };
-                    let page_height = pb.bottom - body_top - repeated_height;
+                    let repeat_h = if repeated_height < (pb.bottom - body_top) - 0.01 { repeated_height } else { 0.0 };
+                    let page_height = pb.bottom - body_top - repeat_h;
                     height <= page_height + 0.01 && !row_can_start(ctx.doc, next, laid, pb.bottom - pb.y - height, page_height)
                 });
             // A row another row follows needs room for the border below it too (measured in Word).
@@ -317,8 +318,12 @@ pub(crate) fn place_table(ctx: &mut Ctx, pb: &mut PageBuilder, t: &wordcraft_doc
                 None => {}
             }
             pb.advance(block, body_top);
-            // Repeat header rows, up to the layout's cap.
-            if ri >= header_rows.len() && ctx.header_repeats.saturating_add(header_cost) <= header_cap {
+            // Repeat header rows when they leave room on a continuation page, up to the layout's
+            // cap: Word stops repeating a header block that alone fills or exceeds the page.
+            if ri >= header_rows.len()
+                && repeated_height < (pb.bottom - body_top) - 0.01
+                && ctx.header_repeats.saturating_add(header_cost) <= header_cap
+            {
                 ctx.header_repeats = ctx.header_repeats.saturating_add(header_cost);
                 for h in header_rows.iter().filter_map(|hr| tl.rows.get(*hr)) {
                     place(pb, h);

@@ -20,6 +20,7 @@ mod missing_glyphs;
 mod nbsp;
 mod nested_cant_split;
 mod numeral;
+mod oracle_layout;
 mod pages;
 mod styleref;
 mod table_contact;
