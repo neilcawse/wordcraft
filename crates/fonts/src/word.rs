@@ -74,6 +74,9 @@ fn substitutes_by_name(family: &str) -> (&'static [&'static str], bool) {
     const MONO: &[&str] = &["Courier New", "Liberation Mono", "Menlo", "Consolas", "DejaVu Sans Mono", "JetBrains Mono"];
     const ARIAL: &[&str] = &["Liberation Sans", "Helvetica", "Helvetica Neue", "Arimo", "Source Sans 3"];
     const ARIAL_UNICODE: &[&str] = &["Arial", "Liberation Sans", "Helvetica", "Helvetica Neue", "Arimo", "Source Sans 3"];
+    // Verdana: wide-set humanist sans; DejaVu Sans and Bitstream Vera Sans match its advance
+    // widths closely (~1%), whereas Carlito and Liberation Sans are ~8-19% narrower.
+    const VERDANA: &[&str] = &["DejaVu Sans", "Bitstream Vera Sans", "Liberation Sans", "Arial", "Noto Sans", "Source Sans 3"];
     const TIMES: &[&str] = &["Liberation Serif", "Times", "Tinos", "Source Serif 4"];
     // Word's symbol fonts (Symbol, Wingdings…) are proprietary: their characters are drawn as their
     // Unicode equivalents (`wordcraft_doc::symbol_fonts`) from these faces or any face that has them.
@@ -162,6 +165,7 @@ fn substitutes_by_name(family: &str) -> (&'static [&'static str], bool) {
         "palatino linotype" | "book antiqua" | "palatino" => (PALATINO, true),
         "arial" | "helvetica" | "arial nova" => (ARIAL, true),
         "arial unicode ms" => (ARIAL_UNICODE, true),
+        "verdana" => (VERDANA, true),
         "times new roman" | "times" => (TIMES, true),
         "courier new" | "courier" | "consolas" | "lucida console" | "cascadia code" | "cascadia mono" => (MONO, true),
         "symbol" | "wingdings" | "wingdings 2" | "wingdings 3" | "segoe ui symbol" | "webdings" => (SYMBOL, true),
@@ -192,6 +196,22 @@ pub fn symbol_font_metrics(family: &str) -> Option<(f64, f64)> {
 pub fn symbol_line(family: &str, resolved: &Resolved) -> Option<(f64, f64)> {
     let m = symbol_font_metrics(family)?;
     (resolved.substituted || one_em(line_metrics(&resolved.face), resolved.face.upem)).then_some(m)
+}
+
+/// Line (ascent, descent) in em for a requested family when drawn in a substitute face whose own
+/// line height differs from Word's: symbol fonts (`symbol_line`), and Verdana when substituted with
+/// width-matched DejaVu Sans / Bitstream Vera Sans (whose hhea is 1.164 em vs Verdana's 1.215 em,
+/// 2059 / 430 per 2048).
+pub fn substituted_line(family: &str, resolved: &Resolved) -> Option<(f64, f64)> {
+    if let Some(m) = symbol_line(family, resolved) {
+        return Some(m);
+    }
+    if resolved.substituted
+        && family.split(';').map(str::trim).filter(|f| !f.is_empty()).any(|f| charset_base_family(f).eq_ignore_ascii_case("verdana"))
+    {
+        return Some((2059.0 / 2048.0, 430.0 / 2048.0));
+    }
+    None
 }
 
 /// Is a line's (ascent, descent) one `upem` em tall?
@@ -741,6 +761,10 @@ fn borrowed_line(family: &str, upem: f64) -> Option<(f64, f64)> {
     let (a, d) = match family.trim().to_ascii_lowercase().as_str() {
         "times" => hhea_line(1825, -443, 87),
         "courier" => hhea_line(1705, -615, 0),
+        // Google Fonts / Windows Roboto uses OS/2 usWinAscent/usWinDescent (1946 / 512 per 2048,
+        // 1.2002 em) in Word for Windows, whereas its hhea is 1900 / -500 (1.1719 em) and older
+        // Linux Android builds ship 2146 / 555 (1.3188 em).
+        "roboto" => (1946.0, 512.0),
         _ => return None,
     };
     Some((a * upem / 2048.0, d * upem / 2048.0))
@@ -1200,5 +1224,45 @@ mod tests {
         assert!(is_thai_family(&thai_list) && !is_thai_family(&named_list));
         let cached = fallback_list_cache().lock().unwrap_or_else(|e| e.into_inner()).classes.len();
         assert!(cached >= 2, "{cached} lists classified");
+    }
+
+    #[test]
+    fn verdana_prefers_dejavu_and_bitstream_vera_over_narrow_sans() {
+        let list = substitutes("Verdana");
+        let pos = |n: &str| list.iter().position(|x| *x == n);
+        assert!(pos("DejaVu Sans").is_some() && pos("Bitstream Vera Sans").is_some(), "{list:?}");
+        assert!(pos("DejaVu Sans") < pos("Liberation Sans"), "{list:?}");
+        assert!(pos("Bitstream Vera Sans") < pos("Liberation Sans"), "{list:?}");
+        assert!(has_named_substitutes("Verdana"));
+        assert!(has_own_substitutes("Verdana"));
+
+        let db = FontDb::global();
+        let resolved = resolve("Verdana", false, false);
+        if !db.has_family("Verdana") {
+            assert!(resolved.substituted);
+            if db.has_family("DejaVu Sans") {
+                assert_eq!(resolved.face.family, "DejaVu Sans");
+            }
+            assert_eq!(substituted_line("Verdana", &resolved), Some((2059.0 / 2048.0, 430.0 / 2048.0)));
+            assert_eq!(substituted_line("Verdana CE", &resolved), Some((2059.0 / 2048.0, 430.0 / 2048.0)));
+        } else {
+            assert_eq!(substituted_line("Verdana", &resolved), None);
+        }
+        let arial = resolve("Arial", false, false);
+        assert_eq!(substituted_line("Arial", &arial), None);
+    }
+
+    #[test]
+    fn roboto_takes_windows_word_line_metrics() {
+        assert_eq!(borrowed_line("Roboto", 2048.0), Some((1946.0, 512.0)));
+        assert_eq!(borrowed_line(" roboto ", 1000.0), Some((1946.0 / 2.048, 512.0 / 2.048)));
+        let db = FontDb::global();
+        if db.has_family("Roboto") {
+            let r = resolve("Roboto", false, false);
+            assert!(!r.substituted);
+            let (a, d) = line_metrics(&r.face);
+            let total = (a + d) / r.face.upem;
+            assert!((total - 2458.0 / 2048.0).abs() < 1e-6, "Roboto line height {total} != 1.2002 em");
+        }
     }
 }

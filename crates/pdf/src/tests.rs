@@ -3423,3 +3423,46 @@ fn chart_and_equation_text_keep_their_pdf_bytes() {
         ["B", "o", "d", "y", " ", "t", "e", "x", "R", "v", "n", "u", "2", "0", "4", "+", "1", equation_x].into_iter().map(String::from).collect();
     assert_eq!(shown, expected, "math face: {}", math_face.family);
 }
+
+#[test]
+fn fixed_layout_table_cell_clips_overflowing_inline_image_in_pdf() {
+    let mut d = Document::new();
+    let media = d.add_media(png(), "png");
+    let mut t = wordcraft_doc::Table::new(1, 2, 300.0);
+    t.props.fixed = true;
+    t.grid = vec![100.0, 200.0];
+    let mut p = Paragraph::with_text("", Default::default());
+    let obj = InlineObject::Image {
+        media,
+        w: 260.0,
+        h: 60.0,
+        alt: String::new(),
+        float: Default::default(),
+        crop: [0.0; 4],
+        fx: Default::default(),
+        ole: None,
+    };
+    p.insert_object(0, obj, &CharProps::default()).unwrap();
+    t.rows[0].cells[1].blocks = vec![para_block(p)];
+    d.insert_block(wordcraft_doc::StoryRef::Body, &wordcraft_doc::Path::top(0), wordcraft_doc::Block::Table(t)).unwrap();
+
+    let lay = wordcraft_layout::layout(&d, &mut wordcraft_layout::LayoutCache::new(), &wordcraft_layout::LayoutOptions::default());
+    let cell1 = lay.pages[0]
+        .items
+        .iter()
+        .find_map(|it| match it {
+            wordcraft_layout::Placed::Cell { row: 0, cell: 1, rect, clip, .. } => Some((*rect, *clip)),
+            _ => None,
+        })
+        .expect("cell 1 placed");
+    assert!(cell1.1, "overflowing inline image in fixed-layout cell must set clip=true");
+    let opts = PdfOptions { compress: false, ..Default::default() };
+    let pdf = export_layout(&d, &lay, &opts).unwrap();
+    let text = String::from_utf8_lossy(&pdf);
+    let x0 = format!("{} ", cell1.0.x);
+    let x1 = format!("{} ", cell1.0.right());
+    assert!(
+        text.contains(&x0) && text.contains(&x1) && text.contains("\nW\nn"),
+        "expected cell clip path ({x0}..{x1}) before overflowing image draw in PDF stream"
+    );
+}
