@@ -272,10 +272,12 @@ pub fn specs() -> Vec<CommandSpec> {
                 return r;
             }
             unalign(s)?;
-            // If nudging a top-level body wrapping Paragraph/Line float in compat >= 15 (outside
-            // web/draft/outline) moves it above page_top, pin vertically to Anchor::Page so it does
-            // not stick at page_top.
-            let pin_y = (!is_unclamped_view(s))
+            // In compat >= 15 (outside web/draft/outline), body wrapping Paragraph/Line floats
+            // clamp to page_top. Nudge relative to the displayed `hit.rect.y` in both directions:
+            // pin vertically to Anchor::Page when moving above page_top, and rebase onto
+            // `hit.origin.y` when moving at/below page_top so already-clamped floats move down
+            // immediately instead of sticking for the clamped offset.
+            let pin = (!is_unclamped_view(s))
                 .then(|| {
                     let (pos, obj) = selected(s)?;
                     let (_, _, float) = obj.frame()?;
@@ -288,17 +290,22 @@ pub fn specs() -> Vec<CommandSpec> {
                     let layout = s.layout();
                     let hit = layout.object(&pos, s.page_hint)?;
                     let page_top = layout.pages.get(hit.page)?.body.y;
-                    let target_y = hit.rect.y + dy;
-                    (target_y < page_top).then_some(target_y)
+                    Some((hit.rect.y + dy, hit.origin.y, page_top))
                 })
                 .flatten();
             with_float(s, |f| {
                 f.x = (f.x + dx).clamp(-MAX_OFFSET, MAX_OFFSET);
-                if let Some(target_y) = pin_y {
-                    f.v_rel = wordcraft_doc::para::Anchor::Page;
-                    f.y = target_y.clamp(-MAX_OFFSET, MAX_OFFSET);
-                } else {
-                    f.y = (f.y + dy).clamp(-MAX_OFFSET, MAX_OFFSET);
+                match pin {
+                    Some((t, _, top)) if t < top => {
+                        f.v_rel = wordcraft_doc::para::Anchor::Page;
+                        f.y = t.clamp(-MAX_OFFSET, MAX_OFFSET);
+                    }
+                    Some((t, oy, _)) => {
+                        f.y = (t - oy).clamp(-MAX_OFFSET, MAX_OFFSET);
+                    }
+                    None => {
+                        f.y = (f.y + dy).clamp(-MAX_OFFSET, MAX_OFFSET);
+                    }
                 }
             })
         })

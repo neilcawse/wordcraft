@@ -115,8 +115,8 @@ pub(crate) fn float_rect(frame: Option<PageFrame>, col: (f32, f32), y0: f32, w: 
 ///
 /// Non-wrapping floats (`BehindText` / `InFrontOfText`) are likewise not clamped.
 ///
-/// Shared with engine placement commands (`arrange.bounds`, `arrange.group`, `arrange.ungroup`)
-/// so body wrapping objects explicitly placed above `page_top` keep `Anchor::Page` vertically.
+/// Shared with engine placement commands (`arrange.bounds`, `arrange.nudge`, `arrange.group`,
+/// `arrange.ungroup`) so body wrapping objects placed above `page_top` keep `Anchor::Page`.
 pub fn clamps_body_para_float(compat_mode: u32, v_rel: Anchor, wrap: Wrap) -> bool {
     compat_mode >= wordcraft_doc::COMPAT_MODE_CURRENT
         && matches!(v_rel, Anchor::Paragraph | Anchor::Line)

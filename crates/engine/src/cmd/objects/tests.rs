@@ -1130,6 +1130,24 @@ fn regroup_and_bounds_above_top_margin_preserve_position_in_modern_compat() {
     let pos = all_objects(&s2)[0].0.clone();
     let nudged = rect_of(&mut s2, &pos);
     assert!((nudged[1] - 40.0).abs() < 0.5, "nudging above page_top must land at y=40, got {nudged:?}");
+
+    // Nudging down from a layout-clamped float (posOffset = -72 -> drawn at 72) by dy = +4 must
+    // move immediately to y = 76 rather than sticking at 72.
+    let mut s3 = Session::new(wordcraft_doc::Document::new());
+    s3.run("insert.shape", &json!({"kind": "rectangle", "width": 80, "height": 40})).unwrap();
+    s3.run("arrange.bounds", &json!({"x": 100, "y": 80})).unwrap();
+    let pos3 = all_objects(&s3)[0].0.clone();
+    super::select::edit_float(&mut s3, &pos3, |f| {
+        f.v_rel = wordcraft_doc::para::Anchor::Paragraph;
+        f.y = -72.0;
+    })
+    .unwrap();
+    s3.touch();
+    assert!((rect_of(&mut s3, &pos3)[1] - 72.0).abs() < 0.5, "clamped float starts drawn at page_top=72");
+    s3.run("arrange.nudge", &json!({"dy": 4})).unwrap();
+    let pos3 = all_objects(&s3)[0].0.clone();
+    let down = rect_of(&mut s3, &pos3);
+    assert!((down[1] - 76.0).abs() < 0.5, "nudging down from clamped float must land at y=76, got {down:?}");
 }
 
 #[test]

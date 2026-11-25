@@ -119,10 +119,11 @@ pub(super) fn copy_to(s: &mut Session, v: &Value) -> CmdResult {
 
 /// Put the object at `pos` with its top-left at (x, y) on `page` (default: where it is), as a
 /// drag does in Word: it floats (an inline object gets Square wrapping) and anchors to the
-/// paragraph under its top edge, positioned relative to that paragraph's column and top. So the
-/// text it lands on flows around it, and it moves with that text. On a page where no paragraph
-/// starts, it anchors to the nearest line and is positioned on the page. Returns the object's
-/// position afterwards.
+/// paragraph under its top edge, positioned relative to that paragraph's column and top (or
+/// vertically to the page when placed above `page_top` in modern compat mode so it is not clamped).
+/// So the text it lands on flows around it, and it moves with that text. On a page where no
+/// paragraph starts, it anchors to the nearest line and is positioned on the page. Returns the
+/// object's position afterwards.
 ///
 /// A drop across pages can be thrown back: while the object sits on its old page it wraps text
 /// away from the paragraph it is anchored to, so once it has moved, that paragraph can move back
