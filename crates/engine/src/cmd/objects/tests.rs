@@ -1103,6 +1103,36 @@ fn ungroup_keeps_a_rotated_groups_arrangement() {
 }
 
 #[test]
+fn regroup_and_bounds_above_top_margin_preserve_position_in_modern_compat() {
+    // Ungrouping a 90-degree rotated group whose top sits above page_top and immediately
+    // regrouping it must keep its visual position rather than jumping down to page_top.
+    let mut s = rectangle_and_arrow(0.0);
+    select_both(&mut s);
+    s.run("arrange.group", &json!({})).unwrap();
+    s.run("arrange.rotation", &json!({"degrees": 90})).unwrap();
+    let before = page_pixels(&s);
+    s.run("arrange.ungroup", &json!({})).unwrap();
+    assert!(pixels_differing(&before, &page_pixels(&s)) < 20, "ungrouping keeps visual position");
+    s.run("arrange.group", &json!({})).unwrap();
+    assert!(pixels_differing(&before, &page_pixels(&s)) < 20, "regrouping keeps visual position above page_top");
+
+    // Explicit arrange.bounds above page_top (y = 30 < 72) in compat 15 keeps the requested y.
+    let mut s2 = Session::new(wordcraft_doc::Document::new());
+    s2.run("insert.shape", &json!({"kind": "rectangle", "width": 80, "height": 40})).unwrap();
+    s2.run("arrange.bounds", &json!({"x": 100, "y": 30})).unwrap();
+    let pos = all_objects(&s2)[0].0.clone();
+    let rect = rect_of(&mut s2, &pos);
+    assert!((rect[1] - 30.0).abs() < 0.5, "explicit bounds above page_top must stay at y=30, got {rect:?}");
+
+    // Nudging up past page_top (y = 80 -> dy = -40 -> y = 40) must not stick at page_top (72).
+    s2.run("arrange.bounds", &json!({"x": 100, "y": 80})).unwrap();
+    s2.run("arrange.nudge", &json!({"dy": -40})).unwrap();
+    let pos = all_objects(&s2)[0].0.clone();
+    let nudged = rect_of(&mut s2, &pos);
+    assert!((nudged[1] - 40.0).abs() < 0.5, "nudging above page_top must land at y=40, got {nudged:?}");
+}
+
+#[test]
 fn picture_alt_and_crop_round_trip() {
     let mut s = Session::new(wordcraft_doc::Document::new());
     let data = super::super::insert::base64_encode(&png(20, 10));

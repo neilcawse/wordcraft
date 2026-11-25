@@ -114,12 +114,17 @@ pub(crate) fn float_rect(frame: Option<PageFrame>, col: (f32, f32), y0: f32, w: 
 /// - `relativeFrom="margin"`, `compatibilityMode=15`: unclamped (`y=0 pt`)
 ///
 /// Non-wrapping floats (`BehindText` / `InFrontOfText`) are likewise not clamped.
-fn clamp_body_para_float(mut r: Rect, float: &Float, page_top: f32, modern: bool) -> Rect {
-    if modern
-        && matches!(float.v_rel, Anchor::Paragraph | Anchor::Line)
-        && !matches!(float.wrap, Wrap::Inline | Wrap::BehindText | Wrap::InFrontOfText)
-        && r.y < page_top
-    {
+///
+/// Shared with engine placement commands (`arrange.bounds`, `arrange.group`, `arrange.ungroup`)
+/// so body wrapping objects explicitly placed above `page_top` keep `Anchor::Page` vertically.
+pub fn clamps_body_para_float(compat_mode: u32, v_rel: Anchor, wrap: Wrap) -> bool {
+    compat_mode >= wordcraft_doc::COMPAT_MODE_CURRENT
+        && matches!(v_rel, Anchor::Paragraph | Anchor::Line)
+        && !matches!(wrap, Wrap::Inline | Wrap::BehindText | Wrap::InFrontOfText)
+}
+
+fn clamp_body_para_float(mut r: Rect, float: &Float, page_top: f32, compat_mode: u32) -> Rect {
+    if clamps_body_para_float(compat_mode, float.v_rel, float.wrap) && r.y < page_top {
         r.y = page_top;
     }
     r
@@ -445,8 +450,8 @@ pub(crate) fn place_late(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, oi:
     let Some((w, h, float)) = floating(o) else { return };
     let h = ctx.float_height(o, w, h);
     let frame = PageFrame { sect: pb.sect, margin_top: None, origin: (0.0, 0.0), number: pb.number, mirror: ctx.mirror };
-    let modern = ctx.doc.settings.compat_mode >= wordcraft_doc::COMPAT_MODE_CURRENT;
-    let rect = clamp_body_para_float(float_rect(Some(frame), (pb.col_x(), pb.col_w()), top, w, h, float), float, pb.page_top, modern);
+    let rect =
+        clamp_body_para_float(float_rect(Some(frame), (pb.col_x(), pb.col_w()), top, w, h, float), float, pb.page_top, ctx.doc.settings.compat_mode);
     let outline = ctx.wrap_outline(o);
     let area = wrap_area(rect, float, outline.as_deref().map(Vec::as_slice)).map(|a| {
         let bounds = a.0;
@@ -522,8 +527,12 @@ fn anchor_floats_but(
             }
             let h = ctx.float_height(o, w, h);
             // Positions relative to the paragraph start above its space before (Word for Windows).
-            let modern = ctx.doc.settings.compat_mode >= wordcraft_doc::COMPAT_MODE_CURRENT;
-            let mut r = clamp_body_para_float(float_rect(Some(frame), (col_x, width), y0 - before, w, h, float), float, pb.page_top, modern);
+            let mut r = clamp_body_para_float(
+                float_rect(Some(frame), (col_x, width), y0 - before, w, h, float),
+                float,
+                pb.page_top,
+                ctx.doc.settings.compat_mode,
+            );
             let outline = ctx.wrap_outline(o);
             let outline = outline.as_deref().map(Vec::as_slice);
             let mut area = wrap_area(r, float, outline);

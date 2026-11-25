@@ -1,4 +1,4 @@
-use super::arrange::{MAX_OFFSET, bounds, copy_to, move_with_text, unalign};
+use super::arrange::{MAX_OFFSET, bounds, copy_to, is_unclamped_view, move_with_text, unalign};
 use super::group::{add_object, group, ungroup};
 use super::picture::{adjust, adjust_media, clear_lum, crop, original_media, recolor, relook, remove_background, reset, size};
 use super::select::{
@@ -272,9 +272,34 @@ pub fn specs() -> Vec<CommandSpec> {
                 return r;
             }
             unalign(s)?;
+            // If nudging a top-level body wrapping Paragraph/Line float in compat >= 15 (outside
+            // web/draft/outline) moves it above page_top, pin vertically to Anchor::Page so it does
+            // not stick at page_top.
+            let pin_y = (!is_unclamped_view(s))
+                .then(|| {
+                    let (pos, obj) = selected(s)?;
+                    let (_, _, float) = obj.frame()?;
+                    if pos.story != wordcraft_doc::StoryRef::Body
+                        || pos.path.depth() != 0
+                        || !wordcraft_layout::clamps_body_para_float(s.doc.settings.compat_mode, float.v_rel, float.wrap)
+                    {
+                        return None;
+                    }
+                    let layout = s.layout();
+                    let hit = layout.object(&pos, s.page_hint)?;
+                    let page_top = layout.pages.get(hit.page)?.body.y;
+                    let target_y = hit.rect.y + dy;
+                    (target_y < page_top).then_some(target_y)
+                })
+                .flatten();
             with_float(s, |f| {
                 f.x = (f.x + dx).clamp(-MAX_OFFSET, MAX_OFFSET);
-                f.y = (f.y + dy).clamp(-MAX_OFFSET, MAX_OFFSET);
+                if let Some(target_y) = pin_y {
+                    f.v_rel = wordcraft_doc::para::Anchor::Page;
+                    f.y = target_y.clamp(-MAX_OFFSET, MAX_OFFSET);
+                } else {
+                    f.y = (f.y + dy).clamp(-MAX_OFFSET, MAX_OFFSET);
+                }
             })
         })
         .params(r#"{"dx"?: pt, "dy"?: pt}"#)

@@ -203,16 +203,37 @@ fn move_object_once(s: &mut Session, pos: &Pos, page: usize, x: f32, y: f32, (w,
     }
     // Then offsets from its paragraph, as laid out with the object there.
     s.touch();
-    let origin = s.layout().object(&at, page).ok_or_else(|| CmdError::Failed("the object isn't laid out".into()))?.origin;
+    let (origin, page_top) = {
+        let lay = s.layout();
+        let hit = lay.object(&at, page).ok_or_else(|| CmdError::Failed("the object isn't laid out".into()))?;
+        let top = (!is_unclamped_view(s) && at.path.depth() == 0).then(|| lay.pages.get(hit.page).map(|p| p.body.y)).flatten();
+        (hit.origin, top)
+    };
+    let compat_mode = s.doc.settings.compat_mode;
     edit_float(s, &at, |f| {
         // On its paragraph now: a page it was anchored to is gone, not only hidden.
         f.page = 0;
         f.h_rel = Anchor::Column;
-        f.v_rel = Anchor::Paragraph;
         f.x = (x - origin.x).clamp(-MAX_OFFSET, MAX_OFFSET);
-        f.y = (y - origin.y).clamp(-MAX_OFFSET, MAX_OFFSET);
+        if page_top.is_some_and(|top| y < top) && wordcraft_layout::clamps_body_para_float(compat_mode, Anchor::Paragraph, f.wrap) {
+            // Word 2013+ (compat >= 15) clamps body wrapping Paragraph floats to page_top; keep
+            // Anchor::Page vertically when placed above page_top so moves, bounds, and grouping
+            // preserve the requested visual position.
+            f.v_rel = Anchor::Page;
+            f.y = y.clamp(-MAX_OFFSET, MAX_OFFSET);
+        } else {
+            f.v_rel = Anchor::Paragraph;
+            f.y = (y - origin.y).clamp(-MAX_OFFSET, MAX_OFFSET);
+        }
     })?;
     Ok(at)
+}
+
+/// Matches layout's non-paginated view modes (`Web | Draft | Outline`), where body float
+/// clamping does not run.
+pub(super) fn is_unclamped_view(s: &Session) -> bool {
+    !s.view.read_mode
+        && matches!(s.view.mode, wordcraft_layout::ViewMode::Web | wordcraft_layout::ViewMode::Draft | wordcraft_layout::ViewMode::Outline)
 }
 
 /// Turn the selected floating object's alignment (left, centred, …) into an offset from its
