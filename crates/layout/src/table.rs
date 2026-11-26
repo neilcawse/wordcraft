@@ -2,6 +2,8 @@
 //! table-style conditional formatting. Rows are laid out as free-standing boxes; pagination
 //! moves whole rows or splits them between lines (`split_row`).
 
+use std::collections::HashMap;
+
 use wordcraft_doc::numbering::Counters;
 use wordcraft_doc::props::{Align, Border, Borders, HeightRule, Rgb, TextDirection, VAlign, VMerge};
 use wordcraft_doc::styles::{PartSet, TablePart, TableStyleProps};
@@ -749,6 +751,7 @@ fn finish_table_rows(ctx: &mut Ctx, input: TableRows<'_>) -> TableLayout {
         .collect();
     // Second pass: place cells with their row height, fills and borders.
     let mut out = Vec::with_capacity(rows.len());
+    let mut vmerge_fills: HashMap<usize, Option<Rgb>> = HashMap::new();
     for (ri, cells) in rows.into_iter().enumerate() {
         let rh = heights.get(ri).copied().unwrap_or(0.0);
         let exact = t.rows.get(ri).is_some_and(|r| r.props.height_rule == HeightRule::Exact && r.props.height.is_some_and(|h| h > 0.0));
@@ -765,6 +768,17 @@ fn finish_table_rows(ctx: &mut Ctx, input: TableRows<'_>) -> TableLayout {
                     k += 1;
                 }
             }
+            let cell_fill = match c.vmerge {
+                VMerge::Restart => {
+                    vmerge_fills.insert(c.g, c.fill);
+                    c.fill
+                }
+                VMerge::Continue => vmerge_fills.get(&c.g).copied().flatten().or(c.fill),
+                VMerge::None => {
+                    vmerge_fills.remove(&c.g);
+                    c.fill
+                }
+            };
             let rect = Rect::new(c.x, 0.0, c.w, span_h);
             if c.vmerge != VMerge::Continue
                 && let Some(f) = c.fill
@@ -831,6 +845,9 @@ fn finish_table_rows(ctx: &mut Ctx, input: TableRows<'_>) -> TableLayout {
                     it.turn(tn.turn, ox, oy);
                 }
             }
+            if let Some(fill) = cell_fill {
+                apply_cell_surface(&mut cell_items, story, fill);
+            }
             let content = items.len();
             for mut it in cell_items {
                 it.translate(0.0, dy);
@@ -847,19 +864,23 @@ fn finish_table_rows(ctx: &mut Ctx, input: TableRows<'_>) -> TableLayout {
             // close the way Word draws them instead of leaving a notch at thick borders.
             let half = |o: Option<Border>| o.filter(Border::is_visible).map_or(0.0, |e| crate::display::rule_width(&e) / 2.0);
             let (hx0, hx1) = (x0 - half(b.left), x1 + half(b.right));
+            // A cell's own borders sit on the enclosing surface (parent cell, text box, or page),
+            // not inside its own shading; descendant rules inside `cell_items` already received
+            // `cell_fill` via `apply_cell_surface`.
+            let surface = crate::RuleSurface { story: Some(story), fill: None };
             let top_vis = c.vmerge != VMerge::Continue;
             if top_vis && let Some(e) = b.top.filter(Border::is_visible) {
-                items.push(Placed::Rule { x0: hx0, y0, x1: hx1, y1: y0, border: e });
+                items.push(Placed::Rule { x0: hx0, y0, x1: hx1, y1: y0, border: e, surface });
             }
             let last_of_merge = c.vmerge == VMerge::None || !cont.get(ri + 1).is_some_and(|v| v.contains(&c.g));
             if last_of_merge && let Some(e) = b.bottom.filter(Border::is_visible) {
-                items.push(Placed::Rule { x0: hx0, y0: y1, x1: hx1, y1, border: e });
+                items.push(Placed::Rule { x0: hx0, y0: y1, x1: hx1, y1, border: e, surface });
             }
             if let Some(e) = b.left.filter(Border::is_visible) {
-                items.push(Placed::Rule { x0, y0, x1: x0, y1, border: e });
+                items.push(Placed::Rule { x0, y0, x1: x0, y1, border: e, surface });
             }
             if let Some(e) = b.right.filter(Border::is_visible) {
-                items.push(Placed::Rule { x0: x1, y0, x1, y1, border: e });
+                items.push(Placed::Rule { x0: x1, y0, x1, y1, border: e, surface });
             }
             items.push(Placed::Cell {
                 rect: Rect::new(c.x, 0.0, c.w, if c.vmerge == VMerge::Continue { rh } else { span_h }),
@@ -871,6 +892,7 @@ fn finish_table_rows(ctx: &mut Ctx, input: TableRows<'_>) -> TableLayout {
                 // A fixed table clips cell content when the column is too narrow for text (laid
                 // out 4 pt wide) or an inline object (e.g. an image) overflows the cell's edges.
                 clip: (exact && c.h > span_h + 0.01) || fixed_overflow,
+                fill: if c.vmerge == VMerge::Continue { None } else { c.fill },
             });
             let top = c.margins[0] + c.borders.top.filter(Border::is_visible).map_or(0.0, |b| b.width.clamp(0.0, 12.0));
             parts.push(CellPart { top, items: first..items.len(), end, align });
@@ -884,6 +906,21 @@ fn finish_table_rows(ctx: &mut Ctx, input: TableRows<'_>) -> TableLayout {
         });
     }
     TableLayout { x, width: total, rows: out }
+}
+
+/// Propagate a cell's shading to descendant rules in the same story that have no closer enclosing
+/// cell shading (paragraphs with `w:pBdr` and nested tables inside the cell). Floating text boxes
+/// anchored in the cell belong to their own story (`StoryRef::Part(_)`) and are left untouched.
+fn apply_cell_surface(items: &mut [Placed], story: StoryRef, fill: Rgb) {
+    for it in items {
+        match it {
+            Placed::Rule { surface, .. } if surface.story == Some(story) && surface.fill.is_none() => {
+                surface.fill = Some(fill);
+            }
+            Placed::Clip { items, .. } => apply_cell_surface(items, story, fill),
+            _ => {}
+        }
+    }
 }
 
 /// Whether any horizontal paragraph line placed in a fixed-layout cell contains an inline object
@@ -1164,35 +1201,44 @@ fn split_row_with(row: &RowLayout, cut: f32, whole_cells: bool) -> Option<(RowLa
                     a.extend(above.map(|rect| Placed::Fill { rect, color: *color }));
                     b.extend(below.map(|rect| Placed::Fill { rect, color: *color }));
                 }
-                Placed::Cell { rect, covered, table, row: r, cell, story, clip } => {
+                Placed::Cell { rect, covered, table, row: r, cell, story, clip, fill } => {
                     let (above, below) = split_rect(*rect, cut, geo_shift(rect.bottom(), shift));
-                    let cell_at =
-                        |rect| Placed::Cell { rect, covered: *covered, table: table.clone(), row: *r, cell: *cell, story: *story, clip: *clip };
+                    let cell_at = |rect| Placed::Cell {
+                        rect,
+                        covered: *covered,
+                        table: table.clone(),
+                        row: *r,
+                        cell: *cell,
+                        story: *story,
+                        clip: *clip,
+                        fill: *fill,
+                    };
                     a.extend(above.map(cell_at));
                     b.extend(below.map(cell_at));
                 }
-                Placed::Rule { x0, y0, x1, y1, border } => {
+                Placed::Rule { x0, y0, x1, y1, border, surface } => {
+                    let surface = *surface;
                     if (y0 - y1).abs() < 0.01 {
                         // Horizontal: the top edge stays, the bottom edge moves; both fragments close.
                         if *y0 <= 0.01 {
                             a.push(it.clone());
-                            b.push(Placed::Rule { x0: *x0, y0: 0.0, x1: *x1, y1: 0.0, border: *border });
+                            b.push(Placed::Rule { x0: *x0, y0: 0.0, x1: *x1, y1: 0.0, border: *border, surface });
                         } else if *y0 >= row.height - 0.01 {
-                            a.push(Placed::Rule { x0: *x0, y0: cut, x1: *x1, y1: cut, border: *border });
-                            b.push(Placed::Rule { x0: *x0, y0: y0 - rest, x1: *x1, y1: y1 - rest, border: *border });
+                            a.push(Placed::Rule { x0: *x0, y0: cut, x1: *x1, y1: cut, border: *border, surface });
+                            b.push(Placed::Rule { x0: *x0, y0: y0 - rest, x1: *x1, y1: y1 - rest, border: *border, surface });
                         } else if *y0 <= cut {
                             a.push(it.clone());
                         } else {
-                            b.push(Placed::Rule { x0: *x0, y0: y0 - shift, x1: *x1, y1: y1 - shift, border: *border });
+                            b.push(Placed::Rule { x0: *x0, y0: y0 - shift, x1: *x1, y1: y1 - shift, border: *border, surface });
                         }
                     } else {
                         let (t, bt) = (y0.min(*y1), y0.max(*y1));
                         if t < cut {
-                            a.push(Placed::Rule { x0: *x0, y0: t, x1: *x1, y1: bt.min(cut), border: *border });
+                            a.push(Placed::Rule { x0: *x0, y0: t, x1: *x1, y1: bt.min(cut), border: *border, surface });
                         }
                         if bt > cut {
                             let shift = geo_shift(bt, shift);
-                            b.push(Placed::Rule { x0: *x0, y0: (t - shift).max(0.0), x1: *x1, y1: bt - shift, border: *border });
+                            b.push(Placed::Rule { x0: *x0, y0: (t - shift).max(0.0), x1: *x1, y1: bt - shift, border: *border, surface });
                         }
                     }
                 }

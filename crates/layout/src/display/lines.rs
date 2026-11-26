@@ -27,6 +27,8 @@ pub(super) struct LineRender<'a, 'authors, 'author_doc> {
     pub authors: &'authors Authors<'author_doc>,
     pub alpha: f32,
     pub down: bool,
+    pub cell_bg: Option<Rgb>,
+    pub outer_bg: Option<Rgb>,
 }
 
 struct LineContext<'a, 'authors, 'author_doc> {
@@ -46,19 +48,24 @@ struct LineContext<'a, 'authors, 'author_doc> {
     alpha: f32,
     down: bool,
     auto: Option<Rgb>,
+    /// Paragraph or cell shading directly behind this paragraph (overrides a text box's `a:fontRef`).
+    local_bg: Option<Rgb>,
+    /// Text box fill or page colour behind the paragraph when no local shading paints over it.
+    outer_bg: Option<Rgb>,
 }
 
 impl LineContext<'_, '_, '_> {
-    fn ink(&self, color: &TextColor, background: Option<Rgb>) -> Rgb {
-        match (color, self.auto) {
-            (TextColor::Auto, Some(rgb)) => rgb,
-            _ => text_color(color, background),
+    fn ink(&self, color: &TextColor, run_bg: Option<Rgb>) -> Rgb {
+        let local = run_bg.or(self.local_bg);
+        match (color, local, self.auto) {
+            (TextColor::Auto, None, Some(rgb)) => rgb,
+            _ => text_color(color, local.or(self.outer_bg)),
         }
     }
 }
 
 pub(super) fn lines(input: LineRender<'_, '_, '_>, out: &mut Vec<Draw>) {
-    let LineRender { doc, story, path, pl, range, origin: (x, y), opts, authors, alpha, down } = input;
+    let LineRender { doc, story, path, pl, range, origin: (x, y), opts, authors, alpha, down, cell_bg, outer_bg } = input;
     let (l0, l1) = (range.start, range.end);
     let Some(first) = pl.lines.get(l0) else { return };
     let para = doc.para(story, path);
@@ -67,12 +74,13 @@ pub(super) fn lines(input: LineRender<'_, '_, '_>, out: &mut Vec<Draw>) {
         StoryRef::Part(id) => doc.parts.get(&id).and_then(|p| p.body.auto_color),
         StoryRef::Body => None,
     };
+    let local_bg = pl.rp.shading.or(cell_bg);
     for li in l0..l1 {
         let Some(line) = pl.lines.get(li) else { continue };
         let top = y + (line.top - first.top);
         let base = top + (line.baseline - line.top);
         let bottom = top + line.height;
-        let ctx = LineContext { doc, story, path, pl, para, line, li, x, top, base, bottom, opts, authors, alpha, down, auto };
+        let ctx = LineContext { doc, story, path, pl, para, line, li, x, top, base, bottom, opts, authors, alpha, down, auto, local_bg, outer_bg };
         comment_backgrounds(&ctx, out);
         character_backgrounds(&ctx, out);
         draw_label_and_hyphen(&ctx, out);
@@ -219,12 +227,12 @@ fn draw_glyph_runs(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
         // Moved text marked (none) is plain text, its colour setting aside (Word for Mac).
         let plain_move = (moved_from && m.move_from_mark == DeleteMark::None) || (moved_to && m.move_to_mark == InsertMark::None);
         let color = match (ins, del) {
-            _ if plain_move => text_color(&rc.color, rc.shading.or(rc.highlight)),
+            _ if plain_move => ctx.ink(&rc.color, rc.highlight.or(rc.shading)),
             (_, Some(r)) if moved_from => m.move_from_color.unwrap_or_else(|| author(r)),
             (Some(r), _) if moved_to => m.move_to_color.unwrap_or_else(|| author(r)),
             (Some(r), _) => m.insert_color.unwrap_or_else(|| author(r)),
             (None, Some(r)) => m.delete_color.unwrap_or_else(|| author(r)),
-            _ => ctx.ink(&rc.color, rc.shading.or(rc.highlight)),
+            _ => ctx.ink(&rc.color, rc.highlight.or(rc.shading)),
         };
         // The highlight or shading drawn under this run (as filled in the backgrounds pass).
         let text_bg = rc.highlight.or(rc.shading);
@@ -484,12 +492,12 @@ fn character_backgrounds(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
             continue;
         }
         if let Some((previous, x0, x1)) = open.take() {
-            char_box(&previous, x0, x1, ctx.top, ctx.bottom, ctx.alpha, out);
+            char_box(&previous, (x0, x1), (ctx.top, ctx.bottom), ctx.ink(&TextColor::Auto, None), ctx.alpha, out);
         }
         open = border.map(|border| (border, ctx.x + left, ctx.x + right));
     }
     if let Some((border, x0, x1)) = open {
-        char_box(&border, x0, x1, ctx.top, ctx.bottom, ctx.alpha, out);
+        char_box(&border, (x0, x1), (ctx.top, ctx.bottom), ctx.ink(&TextColor::Auto, None), ctx.alpha, out);
     }
 }
 
@@ -526,7 +534,7 @@ fn draw_label_and_hyphen(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
         }
         for run in &label.runs {
             let Some(style) = ctx.pl.styles.get(run.style as usize) else { continue };
-            let color = del_color.unwrap_or_else(|| ctx.ink(&style.rc.color, None));
+            let color = del_color.unwrap_or_else(|| ctx.ink(&style.rc.color, style.rc.highlight.or(style.rc.shading)));
             // Each deleted character shows as #.
             let hash = (del_mark == Some(DeleteMark::Hash)).then(|| style.face.glyph_for('#'));
             out.push(Draw::Glyphs {
@@ -579,7 +587,7 @@ fn draw_hyphen(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
             face: style.face,
             size: style.size,
             glyphs: vec![(glyph, hx, ctx.base - style.shift)],
-            color: ctx.ink(&style.rc.color, None),
+            color: ctx.ink(&style.rc.color, style.rc.highlight.or(style.rc.shading)),
             alpha: ctx.alpha,
             synth_bold: style.synth_bold,
             synth_italic: style.synth_italic,
@@ -681,7 +689,7 @@ fn draw_rubies(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
                 face: st.face,
                 size: st.size,
                 glyphs: run.iter().map(|(_, g)| (g.gid, cx + g.dx, y - g.dy)).collect(),
-                color: ctx.ink(&st.rc.color, st.rc.shading.or(st.rc.highlight)),
+                color: ctx.ink(&st.rc.color, st.rc.highlight.or(st.rc.shading)),
                 alpha,
                 synth_bold: st.synth_bold,
                 synth_italic: st.synth_italic,
@@ -739,7 +747,10 @@ fn inline_objects(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
             }
             Some(o @ InlineObject::Field { .. }) => {
                 if let Some(wordcraft_doc::legacy_form::LegacyForm::CheckBox { checked, .. }) = o.legacy_form() {
-                    let color = pl.styles.get(c.style as usize).map_or(Rgb::BLACK, |st| text_color(&st.rc.color, None));
+                    let color = pl
+                        .styles
+                        .get(c.style as usize)
+                        .map_or_else(|| ctx.ink(&TextColor::Auto, None), |st| ctx.ink(&st.rc.color, st.rc.highlight.or(st.rc.shading)));
                     let frame = Rect::new(cx, base - c.obj_h.max(0.0), c.adv, c.obj_h + c.obj_d);
                     check_box(frame, checked, color, alpha, out);
                 }
@@ -787,7 +798,7 @@ fn tab_leaders(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
             face: style.face,
             size: style.size,
             glyphs,
-            color: ctx.ink(&style.rc.color, None),
+            color: ctx.ink(&style.rc.color, style.rc.highlight.or(style.rc.shading)),
             alpha: ctx.alpha,
             synth_bold: false,
             synth_italic: false,
@@ -849,7 +860,7 @@ fn enclosures(ctx: &LineContext<'_, '_, '_>, out: &mut Vec<Draw>) {
             rect,
             kind: enclosure.kind,
             fill: None,
-            stroke: Some(ctx.ink(&style.rc.color, None)),
+            stroke: Some(ctx.ink(&style.rc.color, style.rc.highlight.or(style.rc.shading))),
             stroke_width: enclosure.stroke,
             effects: Default::default(),
             corner: None,
