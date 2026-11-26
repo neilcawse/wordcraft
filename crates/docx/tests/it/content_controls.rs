@@ -4,7 +4,7 @@
 
 use wordcraft_doc::control::{ControlKind, ControlLock, ListItem};
 use wordcraft_doc::{Block, ContentControl, Document, StoryRef};
-use wordcraft_docx::{read, write};
+use wordcraft_docx::{read, read_xml, write, write_flat};
 
 const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml""#;
 const ROOT_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
@@ -426,4 +426,93 @@ fn field_result_rpr_change_and_form_field_round_trip() {
     assert!(xml.contains(r#"<w:name w:val="Field1"/>"#), "{xml}");
     assert!(xml.contains("Added ") && xml.contains("<w:ins "), "{xml}");
     assert_eq!(xml.matches("<w:rPrChange ").count(), 3, "{xml}");
+}
+
+#[test]
+fn list_item_omits_empty_display_text_on_round_trip() {
+    let combo = sdt(
+        r#"<w:id w:val="41"/><w:comboBox><w:listItem w:value="Choose an item."/><w:listItem w:displayText="Option A" w:value="a"/></w:comboBox>"#,
+        &t("Choose an item."),
+    );
+    let dropdown = sdt(
+        r#"<w:id w:val="42"/><w:dropDownList><w:listItem w:value="Select one"/><w:listItem w:displayText="Option B" w:value="b"/></w:dropDownList>"#,
+        &t("Select one"),
+    );
+    let docx = package(&p(&format!("{combo}{dropdown}")));
+    let doc = read(&docx).unwrap();
+    let bytes = write(&doc).unwrap();
+    let xml = document_xml(&bytes);
+
+    assert!(!xml.contains(r#"w:displayText="""#), "empty w:displayText must be omitted: {xml}");
+    assert!(xml.contains(r#"<w:listItem w:value="Choose an item."/>"#), "{xml}");
+    assert!(xml.contains(r#"<w:listItem w:displayText="Option A" w:value="a"/>"#), "{xml}");
+    assert!(xml.contains(r#"<w:listItem w:value="Select one"/>"#), "{xml}");
+    assert!(xml.contains(r#"<w:listItem w:displayText="Option B" w:value="b"/>"#), "{xml}");
+
+    let back = read(&bytes).unwrap();
+    assert_eq!(
+        by_id(&back, 41).kind,
+        ControlKind::ComboBox {
+            items: vec![
+                ListItem { display: String::new(), value: "Choose an item.".into() },
+                ListItem { display: "Option A".into(), value: "a".into() }
+            ],
+            last_value: String::new(),
+        }
+    );
+    assert_eq!(
+        by_id(&back, 42).kind,
+        ControlKind::DropDown {
+            items: vec![ListItem { display: String::new(), value: "Select one".into() }, ListItem { display: "Option B".into(), value: "b".into() }],
+            last_value: String::new(),
+        }
+    );
+}
+
+#[test]
+fn list_item_omits_empty_attrs_in_docx_and_write_flat() {
+    let combo = sdt(
+        r#"<w:id w:val="51"/><w:comboBox><w:listItem w:value="Choose an item."/><w:listItem/><w:listItem w:displayText="Option A" w:value="a"/></w:comboBox>"#,
+        &t("Choose an item."),
+    );
+    let dropdown = sdt(r#"<w:id w:val="52"/><w:dropDownList><w:listItem w:value="Select one"/><w:listItem/></w:dropDownList>"#, &t("Select one"));
+    let doc = read(&package(&p(&format!("{combo}{dropdown}")))).unwrap();
+
+    let docx_bytes = write(&doc).unwrap();
+    let docx_xml = document_xml(&docx_bytes);
+    assert!(!docx_xml.contains(r#"w:displayText="""#), "empty w:displayText must be omitted in .docx: {docx_xml}");
+    assert!(!docx_xml.contains(r#"w:value="""#), "empty w:value must be omitted when both empty in .docx: {docx_xml}");
+    assert!(docx_xml.contains(r#"<w:listItem w:value="Choose an item."/>"#), "{docx_xml}");
+    assert!(docx_xml.contains("<w:listItem/>"), "both-empty listItem must serialize as <w:listItem/> in .docx: {docx_xml}");
+    assert!(docx_xml.contains(r#"<w:listItem w:displayText="Option A" w:value="a"/>"#), "{docx_xml}");
+
+    let flat_bytes = write_flat(&doc).unwrap();
+    let flat_xml = std::str::from_utf8(&flat_bytes).unwrap();
+    assert!(flat_xml.starts_with("<?xml") && flat_xml.contains(r#"<?mso-application progid="Word.Document"?>"#), "{flat_xml}");
+    assert!(!flat_xml.contains(r#"w:displayText="""#), "empty w:displayText must be omitted in write_flat: {flat_xml}");
+    assert!(!flat_xml.contains(r#"w:value="""#), "empty w:value must be omitted when both empty in write_flat: {flat_xml}");
+    assert!(flat_xml.contains(r#"<w:listItem w:value="Choose an item."/>"#), "{flat_xml}");
+    assert!(flat_xml.contains("<w:listItem/>"), "both-empty listItem must serialize as <w:listItem/> in write_flat: {flat_xml}");
+    assert!(flat_xml.contains(r#"<w:listItem w:displayText="Option A" w:value="a"/>"#), "{flat_xml}");
+    assert!(flat_xml.contains(r#"<w:listItem w:value="Select one"/>"#), "{flat_xml}");
+
+    let back = read_xml(&flat_bytes).unwrap();
+    assert_eq!(
+        by_id(&back, 51).kind,
+        ControlKind::ComboBox {
+            items: vec![
+                ListItem { display: String::new(), value: "Choose an item.".into() },
+                ListItem { display: String::new(), value: String::new() },
+                ListItem { display: "Option A".into(), value: "a".into() },
+            ],
+            last_value: String::new(),
+        }
+    );
+    assert_eq!(
+        by_id(&back, 52).kind,
+        ControlKind::DropDown {
+            items: vec![ListItem { display: String::new(), value: "Select one".into() }, ListItem { display: String::new(), value: String::new() },],
+            last_value: String::new(),
+        }
+    );
 }

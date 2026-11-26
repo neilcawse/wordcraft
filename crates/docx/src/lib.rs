@@ -108,6 +108,156 @@ fn preprocess_deep_groups(bytes: &[u8]) -> Option<Vec<u8>> {
     out.finish().ok()
 }
 
+fn strip_empty_list_item_display_text_el(el: &mut craft_xml::El) -> bool {
+    let mut changed = false;
+    if el.name == "w:listItem" {
+        let empty_display = el.attr("w:displayText").is_some_and(str::is_empty);
+        if empty_display {
+            let empty_value = el.attr("w:value").is_some_and(str::is_empty);
+            let before = el.attrs.len();
+            el.attrs.retain(|(k, v)| !(k == "w:displayText" && v.is_empty()) && !(empty_value && k == "w:value" && v.is_empty()));
+            if el.attrs.len() != before {
+                changed = true;
+            }
+        }
+    }
+    for node in &mut el.children {
+        if let craft_xml::Node::El(child) = node
+            && strip_empty_list_item_display_text_el(child)
+        {
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn strip_empty_list_item_display_text_xml(data: &[u8]) -> Option<Vec<u8>> {
+    let s = std::str::from_utf8(data).ok()?;
+    if !s.contains("w:listItem") || !s.contains(r#"w:displayText="""#) {
+        return None;
+    }
+    let mut root = craft_xml::parse(data).ok()?;
+    if !strip_empty_list_item_display_text_el(&mut root) {
+        return None;
+    }
+    let mut out = String::with_capacity(data.len());
+    out.push_str(craft_xml::DECL_STANDALONE);
+    root.write_xml(&mut out);
+    Some(out.into_bytes())
+}
+
+fn is_flat_word_xml_part(before_xml_data: &str) -> bool {
+    let Some(part_start) = before_xml_data.rfind("<pkg:part ") else {
+        return false;
+    };
+    let tag = &before_xml_data[part_start..];
+    let Some(rest) = tag.split_once(r#"pkg:name=""#).map(|(_, r)| r) else {
+        return false;
+    };
+    let Some(name) = rest.split('"').next() else {
+        return false;
+    };
+    name.starts_with("/word/") && name.ends_with(".xml")
+}
+
+/// Strips empty `w:displayText=""` (and `w:value=""` when both are empty) from `<w:listItem>`
+/// elements inside Flat OPC `<pkg:xmlData>` word parts.
+fn postprocess_sdt_list_items_flat(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(s) = std::str::from_utf8(&bytes) else {
+        return bytes;
+    };
+    if !s.contains("w:listItem") || !s.contains(r#"w:displayText="""#) {
+        return bytes;
+    }
+    const OPEN: &str = "<pkg:xmlData>";
+    const CLOSE: &str = "</pkg:xmlData>";
+    let mut out = String::with_capacity(s.len());
+    let mut pos = 0;
+    let mut any_changed = false;
+    while let Some(open_rel) = s[pos..].find(OPEN) {
+        let content_start = pos + open_rel + OPEN.len();
+        let Some(close_rel) = s[content_start..].find(CLOSE) else {
+            break;
+        };
+        let content_end = content_start + close_rel;
+        let prefix = &s[pos..content_start];
+        let inner = &s[content_start..content_end];
+        out.push_str(prefix);
+        if is_flat_word_xml_part(prefix)
+            && inner.contains("w:listItem")
+            && inner.contains(r#"w:displayText="""#)
+            && let Ok(mut root) = craft_xml::parse(inner.as_bytes())
+            && strip_empty_list_item_display_text_el(&mut root)
+        {
+            root.write_xml(&mut out);
+            any_changed = true;
+        } else {
+            out.push_str(inner);
+        }
+        pos = content_end;
+    }
+    if !any_changed {
+        return bytes;
+    }
+    out.push_str(&s[pos..]);
+    out.into_bytes()
+}
+
+/// Strips empty `w:displayText=""` (and `w:value=""` when both are empty) from `<w:listItem>`
+/// elements emitted by `craft-docx`, which Microsoft Word rejects as fatal open error `-2146823167`.
+fn postprocess_sdt_list_items(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(mut archive) = craft_zip::Archive::open(&bytes, ZIP_LIMITS) else {
+        return bytes;
+    };
+    // Pass 1: inspect only word/*.xml entries so media/binary entries are never decompressed
+    // when no list item needs rewriting.
+    let mut rewritten = std::collections::HashMap::new();
+    for idx in 0..archive.len() {
+        let Some(name) = archive.entry_name(idx).ok().flatten() else {
+            return bytes;
+        };
+        if archive.entry_is_dir(idx).ok().flatten().unwrap_or(false) {
+            continue;
+        }
+        if !name.starts_with("word/") || !name.ends_with(".xml") {
+            continue;
+        }
+        let Some(data) = archive.read(&name, craft_docx::MAX_XML_FILE as u64).ok().flatten() else {
+            return bytes;
+        };
+        if let Some(patched) = strip_empty_list_item_display_text_xml(&data) {
+            rewritten.insert(name, patched);
+        }
+    }
+    if rewritten.is_empty() {
+        return bytes;
+    }
+    let mut out = craft_zip::Writer::new();
+    for idx in 0..archive.len() {
+        let Some(name) = archive.entry_name(idx).ok().flatten() else {
+            return bytes;
+        };
+        if archive.entry_is_dir(idx).ok().flatten().unwrap_or(false) {
+            continue;
+        }
+        let stored = archive.is_stored(&name).unwrap_or(false);
+        let comp = if stored { craft_zip::Compression::Stored } else { craft_zip::Compression::Deflated };
+        let data = match rewritten.remove(&name) {
+            Some(patched) => patched,
+            None => {
+                let Some(raw) = archive.read(&name, ZIP_LIMITS.max_total_bytes).ok().flatten() else {
+                    return bytes;
+                };
+                raw
+            }
+        };
+        if out.add(&name, &data, comp).is_err() {
+            return bytes;
+        }
+    }
+    out.finish().unwrap_or(bytes)
+}
+
 pub use craft_docx::{
     DEFAULT_SPIN_COUNT, DocxError, EmbeddedFont, Flavor, MAX_PASSWORD_CHARS, MAX_SOURCES, MAX_XML_FILE, PASSWORD_REQUIRED, PasswordCheck,
     WRONG_PASSWORD, XmlKind, check_password, check_protection_password, encrypt, encrypt_standard_for_tests, encrypt_with_spin_count, package_title,
@@ -186,7 +336,10 @@ pub fn read_xml(bytes: &[u8]) -> Result<wordcraft_doc::Document, DocxError> {
 pub fn write(doc: &wordcraft_doc::Document) -> Result<Vec<u8>, DocxError> {
     let shared = to_shared_model(doc)?;
     craft_docx::write(&shared).map(|bytes| {
-        field_fidelity::postprocess_write(doc, table_revisions::apply_write_table_revs(doc, pic_fidelity::apply_write_extras(doc, bytes)))
+        postprocess_sdt_list_items(field_fidelity::postprocess_write(
+            doc,
+            table_revisions::apply_write_table_revs(doc, pic_fidelity::apply_write_extras(doc, bytes)),
+        ))
     })
 }
 
@@ -194,14 +347,17 @@ pub fn write(doc: &wordcraft_doc::Document) -> Result<Vec<u8>, DocxError> {
 pub fn write_as(doc: &wordcraft_doc::Document, flavor: Flavor) -> Result<Vec<u8>, DocxError> {
     let shared = to_shared_model(doc)?;
     craft_docx::write_as(&shared, flavor).map(|bytes| {
-        field_fidelity::postprocess_write(doc, table_revisions::apply_write_table_revs(doc, pic_fidelity::apply_write_extras(doc, bytes)))
+        postprocess_sdt_list_items(field_fidelity::postprocess_write(
+            doc,
+            table_revisions::apply_write_table_revs(doc, pic_fidelity::apply_write_extras(doc, bytes)),
+        ))
     })
 }
 
 /// Write a document as a Flat OPC XML file.
 pub fn write_flat(doc: &wordcraft_doc::Document) -> Result<Vec<u8>, DocxError> {
     let shared = to_shared_model(doc)?;
-    craft_docx::write_flat(&shared)
+    craft_docx::write_flat(&shared).map(postprocess_sdt_list_items_flat)
 }
 
 /// Write a document as Word 2003 XML.
